@@ -1,0 +1,6 @@
+1.原文
+https://zhuanlan.zhihu.com/p/603486955?utm_id=0
+2.解决数据无法下载的问题
+https://codeleading.com/article/48805565851/
+3.数据gitee地址
+https://gitee.com/jiajiewu/planetoid
