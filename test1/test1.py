@@ -25,13 +25,14 @@ print(data)
 #邻接矩阵并不是n*n的，而是2*边的个数
 edge_index = data.edge_index
 print(edge_index.t())
+print(data.x)#one hot对应34个人
+print(data.y)#4种类型
  
 def visualize_graph(G,color):
     plt.figure(figsize = (7,7)) 
     plt.xticks([]) 
     plt.yticks([]) 
-    nx.draw_networkx(G,pos = nx.spring_layout(G,seed = 42),with_labels = False,
-                     node_color=color ,cmap="Set2")
+    nx.draw_networkx(G, pos = nx.spring_layout(G,seed = 42), with_labels = False, node_color=color ,cmap="Set2")
     plt.show()
     
 def visualize_embedding(h,color,epoch = None,loss = None):

@@ -19,8 +19,7 @@ def visualize_graph(G, color):
     nx.draw_networkx(G, pos=nx.spring_layout(G, seed=41), with_labels=True, node_color=color, cmap="Set2")
     plt.show()
     
-edge_index = torch.tensor([[0, 1, 1, 2, 2, 3, 4],
-                           [1, 2, 4, 0, 3, 4, 2]], dtype=torch.long)  # 第一行为边起点，第二行为边终点
+edge_index = torch.tensor([[0, 1, 1, 2, 2, 3, 4], [1, 2, 4, 0, 3, 4, 2]], dtype=torch.long)  # 第一组为边起点，第二组为边终点
 x = torch.tensor([[0], [1], [2], [3], [4]], dtype=torch.float)        # 节点特征，这里使用一维特征
 data = Data(x=x, edge_index=edge_index)                               # 构建 Data 实例
 G = to_networkx(data=data)                                            # 将 Data 实例转换到 networkx.Graph
