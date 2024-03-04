@@ -38,7 +38,7 @@ def GetAllStockListTushareBak():
     return allstocklistdic
 
 # 获取上证50成分股票列表（baostock）
-def GetSZ50StockList():
+def GetSZ50StockListBaostock():
     # 获取沪深300成分股
     rs = bs.query_sz50_stocks()
     # 打印结果集
@@ -57,7 +57,7 @@ def GetSZ50StockList():
     return allstocklistdic
 
 # 获取沪深300成分股票列表（baostock）
-def GetHS300StockList():
+def GetHS300StockListBaostock():
     # 获取沪深300成分股
     rs = bs.query_hs300_stocks()
     # 打印结果集
@@ -76,7 +76,7 @@ def GetHS300StockList():
     return allstocklistdic
 
 # 获取中证500成分股票列表（baostock）
-def GetZZ500StockList():
+def GetZZ500StockListBaostock():
     # 获取中证500成分股
     rs = bs.query_zz500_stocks()
     # 打印结果集
@@ -129,8 +129,8 @@ def GetStockPool(indexCode='399300.SZ', isReadText = False, codeListPath='C:\\My
         print("异常信息：" + str(e))
     finally :
         if(isReadText is not True) :
-            print('调用指定板块接口失败，调用全市场股票接口')
-            stockPoolDic = GetALLStockListBaostock()
+            print('调用tushare指定板块接口失败，调用baostock股票接口')
+            stockPoolDic = GetHS300StockListBaostock()
             #stockPoolDic = GetAllStockListTushare()
             #stockPoolDic = GetAllStockListTushareBak()
         else:
