@@ -93,7 +93,7 @@ def GetStockPriceDWMBaostock(stockCode, startdate, endDate=time.strftime("%Y-%m-
         startdate = dt.datetime.strptime(startdate,'%Y%m%d').strftime("%Y-%m-%d")
         endDate = dt.datetime.strptime(endDate,'%Y%m%d').strftime("%Y-%m-%d")
     #"code,date,open,high,low,close,volume,amount,adjustflag"
-    df = bs.query_history_k_data_plus(stockCode,"code,date,open,high,low,close,volume",start_date=startdate,end_date=endDate,frequency=type, adjustflag="2")
+    df = bs.query_history_k_data_plus(stockCode,"code,date,open,high,low,close,volume,pctChg",start_date=startdate,end_date=endDate,frequency=type, adjustflag="2")
     # 样本点小于40个不计算
     if df is None or df.error_msg != 'success' or len(df.data) == 0:
         print("获取行情数据数据异常：",stockCode)
@@ -123,7 +123,7 @@ def GetStockPriceMinBaostock(stockCode, startdate, endDate=time.strftime("%Y-%m-
         startdate = dt.datetime.strptime(startdate,'%Y%m%d').strftime("%Y-%m-%d")
         endDate = dt.datetime.strptime(endDate,'%Y%m%d').strftime("%Y-%m-%d")
     #"date,time,code,open,high,low,close,volume,amount,adjustflag"
-    df = bs.query_history_k_data_plus(stockCode,"date,time,open,high,low,close,volume",start_date=startdate,end_date=endDate,frequency=type, adjustflag="2")
+    df = bs.query_history_k_data_plus(stockCode,"date,time,code,open,high,low,close,volume,amount",start_date=startdate,end_date=endDate,frequency=type, adjustflag="2")
     # 样本点小于40个不计算
     if df is None or df.error_msg != 'success' or len(df.data) == 0:
         print("获取行情数据数据异常：",stockCode)
