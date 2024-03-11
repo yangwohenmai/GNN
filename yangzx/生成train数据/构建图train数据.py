@@ -42,8 +42,7 @@ def TrainData(stockPriceDic):
         if len(dataListx) < n:
             continue
         else:
-            pass
-        data.append(Data(x=torch.tensor(np.array(dataListx[-n:])),y=torch.tensor(np.array(dataListy[-1:])),edge_index=edge_index))
+            data.append(Data(x=torch.tensor(np.array(dataListx[-n:])),y=torch.tensor(np.array(dataListy[-1:])),edge_index=edge_index))
     return data
 
 
