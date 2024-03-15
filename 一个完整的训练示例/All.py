@@ -22,10 +22,10 @@ df['item_id'] = item_encoder.fit_transform(df.item_id)
 session_id相同代表是同一个人, 点了四个网页----某一个人的点击行为
 item_id:代表东西是什么(商品id号)
 """
-df.head()
-buy_df.head()
+print(df.head())
+print(buy_df.head())
 
-sampled_session_id = np.random.choice(df.session_id.unique(), 1000, replace=False)
+sampled_session_id = np.random.choice(df.session_id.unique(), 500, replace=False)
 df = df.loc[df.session_id.isin(sampled_session_id)]
 df.nunique()
 

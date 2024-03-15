@@ -45,6 +45,33 @@ def TrainData(stockPriceDic):
             data.append(Data(x=torch.tensor(np.array(dataListx[-n:])),y=torch.tensor(np.array(dataListy[-1:])),edge_index=edge_index))
     return data
 
+def TrainDataInt(stockPriceDic):
+    # 根据N来截断数据N=7
+    # 构建关系矩阵 1.特征矩阵 2.节点关系矩阵 3.权重矩阵
+    n = 7
+    list1 = list()
+    list2 = list()
+    for i in range(0,n):
+        list1.append(i)
+        list2.append(i+1)
+    list3 = list()
+    list3.append(list1)
+    list3.append(list2)
+    edge_index = torch.tensor(np.array(list3))
+    print(edge_index)
+    
+    dataListx = list()
+    dataListy = list()
+    data = list()
+    for key,f in stockPriceDic.items():
+        dataListx.append([int(float(f['open'])*100),int(float(f['close'])*100),int(float(f['low'])*100),int(float(f['high'])*100),int(float(f['volume'])/100000)])
+        dataListy.append(0 if int(float(f['pctChg'])*100) < 0 else 1)
+        if len(dataListx) < n:
+            continue
+        else:
+            data.append(Data(x=torch.tensor(np.array(dataListx[-n:])),y=torch.tensor(np.array(dataListy[-1:])),edge_index=edge_index))
+    return data
+
 
 # 主函数
 if __name__ == '__main__':
