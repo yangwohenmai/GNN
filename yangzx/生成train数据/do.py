@@ -163,3 +163,4 @@ def evalute(loader,model):
 for epoch in range(1):
     roc_auc_score = evalute(dataset,model)
     print('roc_auc_score',roc_auc_score)
+

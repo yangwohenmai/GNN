@@ -311,35 +311,43 @@ class Planetoid(InMemoryDataset):
 
 
 
-
+from torch_geometric.nn import TopKPooling,SAGEConv
 #载入数据
 dataset = Planetoid(root='./data/test11', name='Cora')
 data = dataset[0]
 print(data.x[0].tolist())
 #print(data.y.tolist())
-#print(data.edge_index[0].tolist())
-#print(data.edge_index[1].tolist())
+print(data.edge_index[0].tolist())
+print(data.edge_index[1].tolist())
 #定义网络架构
 class Net(torch.nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        self.conv1 = GCNConv(dataset.num_features, 16)  #输入=节点特征维度，16是中间隐藏神经元个数
-        self.conv2 = GCNConv(16, dataset.num_classes)
+        self.conv1 = GCNConv(dataset.num_features, 128)  #输入=节点特征维度，16是中间隐藏神经元个数
+        self.conv2 = GCNConv(128, 64)
+        self.conv3 = SAGEConv(64, 16)
+        self.conv4 = GCNConv(64, dataset.num_classes)
+        
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = self.conv2(x, edge_index)
+        x = F.relu(x)
+        x = self.conv4(x, edge_index)
         return F.log_softmax(x, dim=1)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = Net().to(device)
 data = data.to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
+print(data.x)
+print(data.y)
 #模型训练
 model.train()
 for epoch in range(200):
     optimizer.zero_grad()
     out = model(data.x, data.edge_index)    #模型的输入有节点特征还有边特征,使用的是全部数据
     loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])   #损失仅仅计算的是训练集的损失
+    #loss = F.nll_loss(out, data.y)   #损失仅仅计算的是训练集的损失
     loss.backward()
     optimizer.step()
 #测试：
