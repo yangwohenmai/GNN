@@ -25,9 +25,23 @@ def TrainData(stockPriceDic):
     n = 7
     list1 = list()
     list2 = list()
-    for i in range(0,n):
-        list1.append(i)
-        list2.append(i+1)
+    #for i in range(0,n):
+    #    list1.append(i)
+    #    list2.append(i+1)
+    #list3 = list()
+    #list3.append(list1)
+    #list3.append(list2)
+    #edge_index = torch.tensor(np.array(list3))
+    #print(edge_index)
+
+    count = len(stockPriceDic)
+    for i in range(0,count):
+        for j in range(n,0,-1):
+            if i < n:
+                continue
+            else:
+                list1.append(i-j)
+                list2.append(i)
     list3 = list()
     list3.append(list1)
     list3.append(list2)
@@ -37,24 +51,35 @@ def TrainData(stockPriceDic):
     dataListx = list()
     dataListy = list()
     data = list()
+    #for key,f in stockPriceDic.items():
+    #    dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float(f['volume'])])
+    #    dataListy.append(0 if float(f['pctChg']) < 0 else 1)
+    #    if len(dataListx) < n:
+    #        continue
+    #    else:
+    #        data.append(Data(x=torch.tensor(np.array(dataListx[-n:])),y=torch.tensor(np.array(dataListy[-1:])),edge_index=edge_index))
+    
     for key,f in stockPriceDic.items():
         dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float(f['volume'])])
         dataListy.append(0 if float(f['pctChg']) < 0 else 1)
-        if len(dataListx) < n:
-            continue
-        else:
-            data.append(Data(x=torch.tensor(np.array(dataListx[-n:])),y=torch.tensor(np.array(dataListy[-1:])),edge_index=edge_index))
+
+    data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
     return data
 
 def TrainDataInt(stockPriceDic):
     # 根据N来截断数据N=7
     # 构建关系矩阵 1.特征矩阵 2.节点关系矩阵 3.权重矩阵
-    n = 7
+    n = 5
     list1 = list()
     list2 = list()
-    for i in range(0,n):
-        list1.append(i)
-        list2.append(i+1)
+    count = len(stockPriceDic)
+    for i in range(0,count):
+        for j in range(n,0,-1):
+            if i < n:
+                continue
+            else:
+                list1.append(i-j)
+                list2.append(i)
     list3 = list()
     list3.append(list1)
     list3.append(list2)
@@ -65,12 +90,12 @@ def TrainDataInt(stockPriceDic):
     dataListy = list()
     data = list()
     for key,f in stockPriceDic.items():
-        dataListx.append([int(float(f['open'])*100),int(float(f['close'])*100),int(float(f['low'])*100),int(float(f['high'])*100),int(float(f['volume'])/100000)])
-        dataListy.append(0 if int(float(f['pctChg'])*100) < 0 else 1)
-        if len(dataListx) < n:
-            continue
-        else:
-            data.append(Data(x=torch.tensor(np.array(dataListx[-n:])),y=torch.tensor(np.array(dataListy[-1:])),edge_index=edge_index))
+        #dataListx.append([float(f['open'])*100,float(f['close'])*100,float(f['low'])*100,float(f['high'])*100,float(f['volume'])])
+        dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high'])])
+        dataListy.append(0 if float(f['pctChg']) < 0 else 1)
+
+    data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
+    
     return data
 
 
