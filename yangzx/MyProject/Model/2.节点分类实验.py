@@ -1,15 +1,34 @@
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
-import 构建图train数据_ForInMemoryDataset
 import baostock as bs
-import 获取个股票行情
+import os
+import sys
+# sys.path.append用于向环境变量中添加路径
+#sys.path.append('..\..')
+# 打印文件绝对路径（absolute path）
+#print (os.path.abspath(__file__))  
+# 打印文件父目录的父目录的路径（文件的上两层目录）
+#print (os.path.dirname(os.path.dirname( os.path.abspath(__file__) ))) 
+# 要调取其他目录下的文件。 需要在atm这一层才可以
+#BASE_DIR=  os.path.dirname(os.path.dirname(os.path.dirname( os.path.abspath(__file__) )))
+#print(BASE_DIR)
+# 将这个路径添加到环境变量中。
+#sys.path.append(BASE_DIR)
+# 打印当前环境变量包含的所有路径
+#print(sys.path)
 
+sys.path.append('..')
+from Data import StockPool
+from Data import StockData
+from Data import TrainData
 
 
 lg = bs.login()
-stockPriceDic = 获取个股票行情.GetStockPriceDWMBaostock('600000.SH', 0)
-data = 构建图train数据_ForInMemoryDataset.TrainDataInt(stockPriceDic)[0]
+#stockPoolList = StockPool.GetStockPool('',False,'')
+#for code in StockPool.GetALLStockListBaostock().keys():
+stockPriceDic = StockData.GetStockPriceDWMBaostock('600000.SH', 0)
+data = TrainData.TrainDataInt(stockPriceDic)[0]
 split = int(len(stockPriceDic)*0.8)
 train_mask=[]
 test_mask=[]
