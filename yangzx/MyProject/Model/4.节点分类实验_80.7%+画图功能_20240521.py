@@ -20,6 +20,8 @@ from sklearn.metrics import precision_recall_fscore_support, precision_score
 #sys.path.append(BASE_DIR)
 # 打印当前环境变量包含的所有路径
 #print(sys.path)
+#画图参考资料
+#https://zhuanlan.zhihu.com/p/634602384?utm_id=0
 
 sys.path.append('..')
 from Data import StockPool
@@ -108,7 +110,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=0.0005)
 
 # 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
 precisions, recalls, f1s, losses = [], [], [], []
-#模型训练
+#模型训练/验证
 model.train()
 for epoch in range(2000):
     optimizer.zero_grad()
@@ -118,16 +120,17 @@ for epoch in range(2000):
     losses.append(loss.item())
     loss.backward()
     optimizer.step()
-    #测试：
+    #启用验证模式
     model.eval()
-    _, predicted_val = torch.max(out[val_mask], dim=1)
+    #_, predicted_val = torch.max(out[val_mask], dim=1)
+    predicted_val = torch.argmax(out[val_mask], dim=1)
     precision_val, recall_val, f1_val, _ = precision_recall_fscore_support(data.y[val_mask], predicted_val, average='macro')
     precisions.append(precision_val)
     recalls.append(recall_val)
     f1s.append(f1_val)
     # 计算负对数似然损失
     print("precision_val: %f, recall_val: %f, f1_val: %f, loss: %f" % (precision_val, recall_val, f1_val, loss.item()))
-    #执行完model.eval()后从新告诉模型开始train
+    #执行完model.eval()后从新开始train模式
     model.train()
 
 # 训练过程参数变化可视化
@@ -136,7 +139,7 @@ plot_metrics(precisions, recalls, f1s, losses)
 
 
 
-
+#预测部分
 #test_predict = model(data.x, data.edge_index)[data.test_mask]
 test_predict = model(data.x.to(torch.float32), data.edge_index)[test_mask]
 max_index = torch.argmax(test_predict, dim=1)
