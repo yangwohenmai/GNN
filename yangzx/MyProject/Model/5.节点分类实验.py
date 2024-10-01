@@ -25,9 +25,9 @@ import torch.nn as nn
 #https://zhuanlan.zhihu.com/p/634602384?utm_id=0
 
 sys.path.append('..')
-from Data import StockPool
-from Data import StockData
-from Data import TrainData
+from DataBase import StockPool
+from DataBase import StockData
+from DataBase import TrainData
 
 
 lg = bs.login()
