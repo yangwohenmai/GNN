@@ -34,6 +34,7 @@ lg = bs.login()
 #stockPoolList = StockPool.GetStockPool('',False,'')
 #for code in StockPool.GetALLStockListBaostock().keys():
 stockPriceDic = StockData.GetStockPriceDWMBaostock('600000.SH', 0)
+stockPriceDic = StockData.GetStockPriceDWMBaostock('600000.SH', 0, '20240501')
 data = TrainData.TrainDataInt(stockPriceDic)[0]
 split_train = int(len(stockPriceDic)*0.75)
 split_val = int(len(stockPriceDic)*0.85)

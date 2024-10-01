@@ -85,12 +85,10 @@ def GetStockPriceTushare(stockCode, period=1401, maPara=[10, 20], calDay=100, ty
 # period: 数据周期
 # type: 数据类型，默认为d，日k线；d=日k线、w=周、m=月，不区分大小写
 # adjustflag：复权类型，默认不复权：3；1：后复权；2：前复权。已支持分钟线、日线、周线、月线前后复权
-def GetStockPriceDWMBaostock(stockCode, startdate, endDate=time.strftime("%Y%m%d"), period=1401, calDay=100, type="d", benchmark="close"):
+def GetStockPriceDWMBaostock(stockCode, startdate, endDate=time.strftime("%Y-%m-%d"), period=1401, calDay=100, type="d", benchmark="close"):
     stockCode = stockCode.split('.')[1].lower()+'.'+stockCode.split('.')[0]
     if startdate == 0:
-        #startdate = (dt.datetime.today() - dt.timedelta(period)).strftime("%Y-%m-%d")
-        startdate = (dt.datetime.strptime(endDate,'%Y%m%d') - dt.timedelta(period)).strftime("%Y-%m-%d")
-        endDate = dt.datetime.strptime(endDate,'%Y%m%d').strftime("%Y-%m-%d")
+        startdate = (dt.datetime.today() - dt.timedelta(period)).strftime("%Y-%m-%d")
     else:
         startdate = dt.datetime.strptime(startdate,'%Y%m%d').strftime("%Y-%m-%d")
         endDate = dt.datetime.strptime(endDate,'%Y%m%d').strftime("%Y-%m-%d")
