@@ -26,10 +26,8 @@ class SGLCN(object):
         self.output_dim = placeholders['labels'].get_shape().as_list()[1]
         self.placeholders = placeholders
 
-        learning_rate1 = tf.compat.v1.train.exponential_decay(
-            learning_rate = FLAGS.lr1, global_step=placeholders['step'], decay_steps=100, decay_rate=0.9, staircase=True)
-        learning_rate2 = tf.compat.v1.train.exponential_decay(
-            learning_rate = FLAGS.lr2, global_step=placeholders['step'], decay_steps=100, decay_rate=0.9, staircase=True)
+        learning_rate1 = tf.compat.v1.train.exponential_decay(learning_rate = FLAGS.lr1, global_step=placeholders['step'], decay_steps=100, decay_rate=0.9, staircase=True)
+        learning_rate2 = tf.compat.v1.train.exponential_decay(learning_rate = FLAGS.lr2, global_step=placeholders['step'], decay_steps=100, decay_rate=0.9, staircase=True)
         self.optimizer1 = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate1)
         self.optimizer2 = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate2)
 
