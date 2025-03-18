@@ -8,27 +8,12 @@ import sys
 import matplotlib.pyplot as plt
 from sklearn.metrics import precision_recall_fscore_support, precision_score
 import torch.nn as nn
-# sys.path.append用于向环境变量中添加路径
-#sys.path.append('..\..')
-# 打印文件绝对路径（absolute path）
-#print (os.path.abspath(__file__))  
-# 打印文件父目录的父目录的路径（文件的上两层目录）
-#print (os.path.dirname(os.path.dirname( os.path.abspath(__file__) ))) 
-# 要调取其他目录下的文件。 需要在atm这一层才可以
-#BASE_DIR=  os.path.dirname(os.path.dirname(os.path.dirname( os.path.abspath(__file__) )))
-#print(BASE_DIR)
-# 将这个路径添加到环境变量中。
-#sys.path.append(BASE_DIR)
-# 打印当前环境变量包含的所有路径
-#print(sys.path)
-#画图参考资料
-#https://zhuanlan.zhihu.com/p/634602384?utm_id=0
+import copy  # 用于保存最佳模型
 
 sys.path.append('..')
 from DataBase import StockPool
 from DataBase import StockData
 from DataBase import TrainData
-
 
 lg = bs.login()
 #stockPoolList = StockPool.GetStockPool('',False,'')
@@ -54,7 +39,6 @@ for i in range(0,len(stockPriceDic)):
         test_mask.append(True)
         val_mask.append(False)
 
-
 def plot_metrics(precisions, recalls, f1s, losses):
     """
     训练指标变化过程可视化
@@ -76,81 +60,97 @@ def plot_metrics(precisions, recalls, f1s, losses):
     plt.legend()
     plt.show()
 
-#print(data.x)
-#print(data.y)
-#print(data.x[0].tolist())
-#print(data.y.tolist())
-#print(data.edge_index[0].tolist())
-#print(data.edge_index[1].tolist())
-#定义网络架构
 class Net(torch.nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        #self.conv1 = GCNConv(dataset.num_features, 128)  #输入=节点特征维度，16是中间隐藏神经元个数
-        self.conv1 = GCNConv(7, 32)  #输入=节点特征维度，16是中间隐藏神经元个数
+        self.conv1 = GCNConv(7, 32)
         self.conv2 = GATConv(32, 64)
         self.conv3 = GCNConv(64, 128)
         self.conv4 = GATConv(128, 2)
         self.conv5 = GATConv(256, 2)
-        #self.conv4 = GCNConv(64, dataset.num_classes)
-        
+
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index)
         x = F.relu(x)
-        #x = F.sigmoid(x)
         x = self.conv2(x, edge_index)
         x = F.relu(x)
         x = self.conv3(x, edge_index)
         x = F.relu(x)
         x = self.conv4(x, edge_index)
         return F.log_softmax(x, dim=1)
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = Net().to(device)
 data = data.to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=0.0005)
 
-# 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
+# Early stopping
+patience = 2500
+best_model_wts = copy.deepcopy(model.state_dict())
+best_precision = 0.0
+best_epoch = 0  # 记录表现最好的epoch
+counter = 0
+
 precisions, recalls, f1s, losses = [], [], [], []
-#模型训练/验证
 model.train()
-for epoch in range(3500):
+l = list()
+for epoch in range(1000):
     optimizer.zero_grad()
-    out = model(data.x.to(torch.float32), data.edge_index)    #模型的输入有节点特征还有边特征,使用的是全部数据
-    #loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])   #损失仅仅计算的是训练集的损失
-    loss = F.nll_loss(out[train_mask], data.y.to(torch.long)[train_mask])   #损失仅仅计算的是训练集的损失
+    out = model(data.x.to(torch.float32), data.edge_index)
+    loss = F.nll_loss(out[train_mask], data.y.to(torch.long)[train_mask])
     losses.append(loss.item())
     loss.backward()
     optimizer.step()
-    #启用验证模式
+    
+    # 启用验证模式
     model.eval()
-    #_, predicted_val = torch.max(out[val_mask], dim=1)
-    predicted_val = torch.argmax(out[val_mask], dim=1)
-    precision_val, recall_val, f1_val, _ = precision_recall_fscore_support(data.y[val_mask], predicted_val, average='macro')
-    precisions.append(precision_val)
-    recalls.append(recall_val)
-    f1s.append(f1_val)
-    # 计算负对数似然损失
-    print("precision_val: %f, recall_val: %f, f1_val: %f, loss: %f" % (precision_val, recall_val, f1_val, loss.item()))
-    #执行完model.eval()后从新开始train模式
+    with torch.no_grad():
+        val_loss = F.nll_loss(out[val_mask], data.y.to(torch.long)[val_mask]).item()
+        predicted_val = torch.argmax(out[val_mask], dim=1)
+        precision_val, recall_val, f1_val, _ = precision_recall_fscore_support(
+            data.y[val_mask], predicted_val, average='macro')
+        precisions.append(precision_val)
+        recalls.append(recall_val)
+        f1s.append(f1_val)
+
+        # 保存最佳模型
+        if precision_val > best_precision:
+            best_precision = precision_val
+            best_model_wts = copy.deepcopy(model.state_dict())
+            best_epoch = epoch + 1  # 记录当前的epoch
+            counter = 0
+        else:
+            counter += 1
+
+        # 打印训练信息
+        print("Epoch: %d, val_loss: %f, precision_val: %f, recall_val: %f, f1_val: %f, train_loss: %f" % (epoch + 1, val_loss, precision_val, recall_val, f1_val, loss.item()))
+        strRe = "Epoch: %d, val_loss: %f, precision_val: %f, recall_val: %f, f1_val: %f, train_loss: %f" % (epoch + 1, val_loss, precision_val, recall_val, f1_val, loss.item())
+        
+        l.append(strRe)
+        # 检查早停条件
+        if counter >= patience:
+            print("Early stopping at epoch %d" % (epoch + 1))
+            break
+
+    # 恢复训练模式
     model.train()
+
+# 加载最佳模型参数
+model.load_state_dict(best_model_wts)
+
+# 输出表现最好的epoch
+print(f"The best model was found at epoch {best_epoch}")
+print(l[int(best_epoch) -1])
 
 # 训练过程参数变化可视化
 plot_metrics(precisions, recalls, f1s, losses)
 
-
-
-
-#预测部分
-#test_predict = model(data.x, data.edge_index)[data.test_mask]
+# 预测部分
 test_predict = model(data.x.to(torch.float32), data.edge_index)[test_mask]
 max_index = torch.argmax(test_predict, dim=1)
-#test_true = data.y[data.test_mask]
 test_true = data.y.to(torch.long)[test_mask]
 correct = 0
 for i in range(len(max_index)):
     if max_index[i] == test_true[i]:
         correct += 1
 print('测试集准确率为：{}%'.format(correct*100/len(test_true)))
-
-
-
