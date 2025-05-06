@@ -37,7 +37,7 @@ def GetAllStockList():
         return allstocklistdic
     except Exception as e:
         print(str(e))
-        allstocklistdic["600000.SH"] = "600000.SH"
+        allstocklistdic["600000.SH"] = "600000"
         return allstocklistdic
     
 

@@ -5,8 +5,13 @@ from torch_geometric.nn import GATConv
 import baostock as bs
 import os
 import sys
+import random
+import numpy as np
+from datetime import datetime
 import matplotlib.pyplot as plt
 from sklearn.metrics import precision_recall_fscore_support, precision_score
+import Strategy_BLJJ
+from Strategy import TradeTag
 # sys.path.append用于向环境变量中添加路径
 #sys.path.append('..\..')
 # 打印文件绝对路径（absolute path）
@@ -32,8 +37,25 @@ from DataBase import TrainData
 lg = bs.login()
 #stockPoolList = StockPool.GetStockPool('',False,'')
 #for code in StockPool.GetALLStockListBaostock().keys():
-stockPriceDic = StockData.GetStockPriceDWMBaostock('600000.SH', 0)
-data = TrainData.TrainDataInt(stockPriceDic)[0]
+stockPriceDic = StockData.GetStockPriceDWMBaostock('000001.SZ', 0)
+# 获取MACD数据
+resultBLJJ = Strategy_BLJJ.MainFunc('000001.SZ', 1450, len(stockPriceDic), "D", "close")["BLJJDic"]
+if resultBLJJ == False:
+    print("指标数据出错")
+# 根据结果获取信号状态区间
+buyAndSellPeriod = TradeTag.TimeLineBuyAndSellPeriod(resultBLJJ['tList'], resultBLJJ['buyDateDic'], resultBLJJ['sellDateDic'], resultBLJJ['longList'], resultBLJJ['shortList'])
+# 匹配信号状态到每个交易日
+newStockPriceDic = dict()
+for key,f in stockPriceDic.items():
+    date_obj = datetime.strptime(key, "%Y-%m-%d").strftime("%Y%m%d")
+    if date_obj in buyAndSellPeriod['flagDic']:
+        flag = buyAndSellPeriod['flagDic'][date_obj]
+        if flag != -1:
+            newStockPriceDic[key] = stockPriceDic[key]
+            newStockPriceDic[key]['flag'] = flag
+stockPriceDic = newStockPriceDic
+# 构建图结构
+data = TrainData.TrainDataMACD(stockPriceDic)[0]
 split_train = int(len(stockPriceDic)*0.75)
 split_val = int(len(stockPriceDic)*0.85)
 train_mask=[]
@@ -53,6 +75,14 @@ for i in range(0,len(stockPriceDic)):
         test_mask.append(True)
         val_mask.append(False)
 
+# 固定所有随机种子
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def plot_metrics(precisions, recalls, f1s, losses):
     """
@@ -103,6 +133,8 @@ class Net(torch.nn.Module):
         x = F.relu(x)
         x = self.conv4(x, edge_index)
         return F.log_softmax(x, dim=1)
+
+set_seed(2)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = Net().to(device)
 data = data.to(device)
@@ -112,7 +144,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=0.0005)
 precisions, recalls, f1s, losses = [], [], [], []
 #模型训练/验证
 model.train()
-for epoch in range(2000):
+for epoch in range(1000):
     optimizer.zero_grad()
     out = model(data.x.to(torch.float32), data.edge_index)    #模型的输入有节点特征还有边特征,使用的是全部数据
     #loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])   #损失仅仅计算的是训练集的损失
@@ -136,9 +168,6 @@ for epoch in range(2000):
 # 训练过程参数变化可视化
 plot_metrics(precisions, recalls, f1s, losses)
 
-
-
-
 #预测部分
 #test_predict = model(data.x, data.edge_index)[data.test_mask]
 test_predict = model(data.x.to(torch.float32), data.edge_index)[test_mask]
@@ -150,6 +179,3 @@ for i in range(len(max_index)):
     if max_index[i] == test_true[i]:
         correct += 1
 print('测试集准确率为：{}%'.format(correct*100/len(test_true)))
-
-
-

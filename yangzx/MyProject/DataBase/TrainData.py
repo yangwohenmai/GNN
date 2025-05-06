@@ -90,15 +90,44 @@ def TrainDataInt(stockPriceDic):
     data = list()
     dayCount = 0
     for key,f in stockPriceDic.items():
-        #dataListx.append([float(f['open'])*100,float(f['close'])*100,float(f['low'])*100,float(f['high'])*100,float(f['volume'])])
         dayCount += 1
         dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float(f['pctChg']),dayCount/len(stockPriceDic),0 if float(f['pctChg']) < 0 else 1])
         dataListy.append(0 if float(f['pctChg']) < 0 else 1)
 
     data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
-    
     return data
 
+def TrainDataMACD(stockPriceDic):
+    # 根据N来截断数据N=7
+    # 构建关系矩阵 1.特征矩阵 2.节点关系矩阵 3.权重矩阵
+    n = 1
+    list1 = list()
+    list2 = list()
+    count = len(stockPriceDic)
+    for i in range(0,count):
+        for j in range(n,0,-1):
+            if i < n:
+                continue
+            else:
+                list1.append(i-j)
+                list2.append(i)
+    list3 = list()
+    list3.append(list1)
+    list3.append(list2)
+    edge_index = torch.tensor(np.array(list3))
+    #print(edge_index)
+    
+    dataListx = list()
+    dataListy = list()
+    data = list()
+    dayCount = 0
+    for key,f in stockPriceDic.items():
+        dayCount += 1
+        dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float(f['pctChg']),dayCount/len(stockPriceDic),f['flag']])
+        dataListy.append(f['flag'])
+
+    data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
+    return data
 
 # 主函数
 if __name__ == '__main__':
