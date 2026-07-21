@@ -169,11 +169,13 @@ for epoch in range(1000):
 plot_metrics(precisions, recalls, f1s, losses)
 
 #预测部分
-#test_predict = model(data.x, data.edge_index)[data.test_mask]
-test_predict = model(data.x.to(torch.float32), data.edge_index)[test_mask]
-max_index = torch.argmax(test_predict, dim=1)
-#test_true = data.y[data.test_mask]
-test_true = data.y.to(torch.long)[test_mask]
+model.eval()
+with torch.no_grad():
+    #test_predict = model(data.x, data.edge_index)[data.test_mask]
+    test_predict = model(data.x.to(torch.float32), data.edge_index)[test_mask]
+    max_index = torch.argmax(test_predict, dim=1)
+    #test_true = data.y[data.test_mask]
+    test_true = data.y.to(torch.long)[test_mask]
 correct = 0
 for i in range(len(max_index)):
     if max_index[i] == test_true[i]:
