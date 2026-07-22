@@ -24,17 +24,95 @@ from Helper import DrawHelper
 filePath = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 print(filePath)
 
+# 策略主函数,直接传入股票数据 baostock版本
+# period:要取值的长度周期，向前取period个自然日数据
+# calDay:要计算的长度天数，取最近calDay个自然日计算
+# type:周期级别，D/W/M 日/周/月
+# benchmark:买卖点交易基准，close以收盘价成交，benchmarkList以当天特定价成交
+def GetBLJJFunc(stockCode, stockDic, period=1401, calDay=100, type="D", benchmark="close"):
+    # 样本点小于40个不计算
+    if stockDic is None or len(stockDic) < calDay:
+        print("数据缺失：",stockCode, "，最大数据量：", len(stockDic))
+        return {"BLJJDic":False}
+    
+    # 遍历重构正向时序上的数据
+    OrderDic = typing.OrderedDict()
+    #for i in range(len(stockDic)):
+    #    value = stockDic[i]
+    #    OrderDic[value[0].replace("-", "")] = {'tdate':value[0].replace("-", ""), 'open':float(value[2]), 'high':float(value[3]), 'low':float(value[4]), 'close':float(value[5])}
+    
+    for rowData in stockDic .values():
+        OrderDic[rowData['date'].replace("-", "")] = {'tdate':rowData['date'].replace("-", ""), 'open':float(rowData['open']), 'high':float(rowData['high']), 'low':float(rowData['low']), 'close':float(rowData['close'])}
+    # BLJJ，计算长短周期交叉线的数值，
+    resultBLJJ = BLJJ.BLJJ(OrderDic,calDay)
+
+    if benchmark == "close":
+        # 买卖点交易基准（取收盘价）
+        benchmarkList = resultBLJJ["closeList"]
+    elif benchmark == "benchmark":
+        # 买卖点交易基准（取中间价）
+        benchmarkList = resultBLJJ["benchmarkList"]
+    
+    #benchmarkList = datax.loc[:,'C']
+    #for i in range(len(datax.loc[:,'C'])):
+        #benchmarkList.append((datax.loc[:,'C'][i]+datax.loc[:,'O'][i])/2)
+    
+    # 简单交叉算法计算买卖点
+    resultCrossDic = CrossSimple.CrossSimple(resultBLJJ["tList"], resultBLJJ["longList"], resultBLJJ["shortList"], benchmarkList, resultBLJJ["closeList"])
+    #redic = CrossSimple.CrossSimple(datax.loc[:,'T'], datax.loc[:,'Long'], datax.loc[:,'Short'], benchmarkList, datax.loc[:,'C'])
+    #print("交易信息:", resultCrossDic["tradeInfo"])
+    #print("交易日期表:",resultCrossDic["tList"])
+    #print("买入日期:", resultCrossDic["buyDateDic"])
+    #print("卖出日期:", resultCrossDic["sellDateDic"])
+    #print("收益曲线:", resultCrossDic["myReturnList"])
+    #print("自然涨跌曲线:", resultCrossDic["ObjectiveRetrunList"])
+
+
+    # 根据买卖点标记持仓周期标签
+    #BuyAndSellPeriod = TradeTag.TimeLineBuyAndSellPeriod(resultCrossDic['tList'], resultCrossDic['buyDateDic'], resultCrossDic['sellDateDic'])
+
+    # 收益统计，若从来没出现过交易信号，输出0
+    signalDic = dict()
+    if len(resultCrossDic["myReturnList"]) > 0:
+        str = resultCrossDic["tradeInfo"][resultCrossDic["tradeInfo"].find("收益率："):]
+        signalDic["info"] = str.replace("\r\n",",").replace("%","").replace("收益率：","").replace("自然涨跌：","").replace(">",",")
+        signalDic["BLJJDic"] = resultCrossDic
+        return signalDic
+    else:
+        signalDic["info"] = 0
+        signalDic["BLJJDic"] = NULL
+        return signalDic
+
+    # 画图，取收盘价和收益率曲线（包含初始价格），作图进行比较
+    CrossLineDic = dict()
+    CrossLineDic['C'] = resultBLJJ["closeList"]
+    CrossLineDic['C'] = resultCrossDic["ObjectiveRetrunList"]# ObjectiveRetrunList默认就是closeList
+    CrossLineDic['Win'] = resultCrossDic["myReturnList"]
+
+    #draw = DrawHelper.DrawLineFunc()
+    #draw.DrawLine_WithSignal(resultCrossDic["tList"], CrossLineDic, resultCrossDic["buyDateDic"], resultCrossDic["sellDateDic"],stockCode)
+    DrawHelper.DrawLine_WithSignal(resultCrossDic["tList"], CrossLineDic, resultCrossDic["buyDateDic"], resultCrossDic["sellDateDic"],stockCode)
+    input()
 
 # 策略主函数 baostock版本
 # period:要取值的长度周期，向前取period个自然日数据
 # calDay:要计算的长度天数，取最近calDay个自然日计算
 # type:周期级别，D/W/M 日/周/月
 # benchmark:买卖点交易基准，close以收盘价成交，benchmarkList以当天特定价成交
-def MainFuncBS(stockCode, period=1401, calDay=100, type="D", benchmark="close"):
-    startdate = (dt.datetime.today() - dt.timedelta(period)).strftime("%Y-%m-%d")
+def MainFuncBS(stockCode, endDate=dt.datetime.today(), period=1401, calDay=100, type="D", benchmark="close"):
+    if endDate == "":
+        endDate = dt.datetime.today()
+    else:
+        endDate = dt.datetime.strptime(endDate, "%Y%m%d")
+    #startdate = (dt.datetime.today() - dt.timedelta(period)).strftime("%Y-%m-%d")
+    startDate = (endDate - dt.timedelta(period)).strftime("%Y-%m-%d")
+    endDate = endDate.strftime("%Y-%m-%d")
+    #enddate = time.strftime("%Y-%m-%d")
+    #date_obj = dt.datetime.strptime("20241001", "%Y%m%d")
+    #startdateMyTemp = (date_obj - dt.timedelta(period)).strftime("%Y-%m-%d")
+    #enddateMyTemp = dt.datetime.strptime("20241001", "%Y%m%d").strftime("%Y-%m-%d")
     df = bs.query_history_k_data_plus(stockCode, "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,isST",
-        start_date=startdate, end_date=time.strftime("%Y-%m-%d"), frequency="d", adjustflag="3")
-    print(df.data)
+        start_date=startDate, end_date=endDate, frequency="d", adjustflag="3")
     # 样本点小于40个不计算
     if df is None or df.data is None or len(df.data) < calDay:
         print("数据缺失：",stockCode, "，最大数据量：", len(df.data))
@@ -44,7 +122,7 @@ def MainFuncBS(stockCode, period=1401, calDay=100, type="D", benchmark="close"):
     OrderDic = typing.OrderedDict()
     for i in range(len(df.data)):
         value = df.data[i]
-        OrderDic[value[0]] = {'tdate':value[0], 'open':float(value[2]), 'high':float(value[3]), 'low':float(value[4]), 'close':float(value[5])}
+        OrderDic[value[0].replace("-", "")] = {'tdate':value[0].replace("-", ""), 'open':float(value[2]), 'high':float(value[3]), 'low':float(value[4]), 'close':float(value[5])}
     
     # BLJJ，计算长短周期交叉线的数值，
     resultBLJJ = BLJJ.BLJJ(OrderDic,calDay)
@@ -102,11 +180,16 @@ def MainFuncBS(stockCode, period=1401, calDay=100, type="D", benchmark="close"):
 # calDay:要计算的长度天数，取最近calDay个自然日计算
 # type:周期级别，D/W/M 日/周/月
 # benchmark:买卖点交易基准，close以收盘价成交，benchmarkList以当天特定价成交
-def MainFunc(stockCode, period=1401, calDay=100, type="D", benchmark="close"):
+def MainFunc(stockCode, endDate=dt.datetime.today(), period=1401, calDay=100, type="D", benchmark="close"):
+    if endDate == "":
+        endDate = dt.datetime.today()
+    else:
+        endDate = dt.datetime.strptime(endDate, "%Y%m%d")
     #datax = CsvHelper.GetAllDataFloatWithHeader(filePath + r'\data\BLJJData.csv')
-    startdate = (dt.datetime.today() - dt.timedelta(period)).strftime("%Y%m%d")
-    df = ts.pro_bar(ts_code=stockCode, adj='qfq', freq=type, start_date=startdate, end_date=time.strftime("%Y%m%d"))
-    #df = ts.pro_bar(ts_code="300083.SZ", start_date=startdate, end_date="20220121")
+    startDate = (endDate - dt.timedelta(period)).strftime("%Y%m%d")
+    endDate = endDate.strftime("%Y%m%d")
+    df = ts.pro_bar(ts_code=stockCode, adj='qfq', freq=type, start_date=startDate, end_date=endDate)
+    #df = ts.pro_bar(ts_code="300083.SZ", start_date=startDate, end_date="20220121")
     
     # 样本点小于40个不计算
     if df is None or df.values is None or len(df.values) < calDay:

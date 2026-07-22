@@ -9,7 +9,7 @@ import random
 import numpy as np
 from datetime import datetime
 import matplotlib.pyplot as plt
-from sklearn.metrics import precision_recall_fscore_support, precision_score
+from sklearn.metrics import precision_recall_fscore_support, precision_score, confusion_matrix, accuracy_score
 import Strategy_BLJJ
 from Strategy import TradeTag
 # sys.path.append用于向环境变量中添加路径
@@ -33,13 +33,13 @@ from DataBase import StockPool
 from DataBase import StockData
 from DataBase import TrainData
 
-
 lg = bs.login()
 #stockPoolList = StockPool.GetStockPool('',False,'')
-#for code in StockPool.GetALLStockListBaostock().keys():
-stockPriceDic = StockData.GetStockPriceDWMBaostock('000001.SZ', 0)
-# 获取MACD数据
-resultBLJJ = Strategy_BLJJ.MainFunc('000001.SZ', 1450, len(stockPriceDic), "D", "close")["BLJJDic"]
+stockPriceDic = StockData.GetStockPriceDWMBaostock('000001.SZ', "20250501", 1401)
+# 获取MACD数据 MainFuncBS:数据源baostock; MainFunc:数据源TS;
+resultBLJJ = Strategy_BLJJ.GetBLJJFunc('000001.SZ', stockPriceDic, 1450, int(len(stockPriceDic)*0.9), "D", "close")["BLJJDic"]
+#resultBLJJ = Strategy_BLJJ.MainFuncBS('000001.SZ', "20241101", 1450, len(stockPriceDic), "D", "close")["BLJJDic"]
+#resultBLJJ = Strategy_BLJJ.MainFunc('000001.SZ', "20241101", 1450, len(stockPriceDic), "D", "close")["BLJJDic"]
 if resultBLJJ == False:
     print("指标数据出错")
 # 根据结果获取信号状态区间
@@ -152,11 +152,12 @@ for epoch in range(1000):
     losses.append(loss.item())
     loss.backward()
     optimizer.step()
-    #启用验证模式
+    #启用验证模式，重新前向传播计算验证集指标
     model.eval()
-    #_, predicted_val = torch.max(out[val_mask], dim=1)
-    predicted_val = torch.argmax(out[val_mask], dim=1)
-    precision_val, recall_val, f1_val, _ = precision_recall_fscore_support(data.y[val_mask], predicted_val, average='macro')
+    with torch.no_grad():
+        out_val = model(data.x.to(torch.float32), data.edge_index)
+        predicted_val = torch.argmax(out_val[val_mask], dim=1)
+        precision_val, recall_val, f1_val, _ = precision_recall_fscore_support(data.y.to(torch.long)[val_mask].cpu(), predicted_val.cpu(), average='macro')
     precisions.append(precision_val)
     recalls.append(recall_val)
     f1s.append(f1_val)
@@ -166,7 +167,17 @@ for epoch in range(1000):
     model.train()
 
 # 训练过程参数变化可视化
-plot_metrics(precisions, recalls, f1s, losses)
+#plot_metrics(precisions, recalls, f1s, losses)
+
+#预测部分
+#test_predict = model(data.x.to(torch.float32), data.edge_index)[test_mask]
+#max_index = torch.argmax(test_predict, dim=1)
+#test_true = data.y.to(torch.long)[test_mask]
+#correct = 0
+#for i in range(len(max_index)):
+#    if max_index[i] == test_true[i]:
+#        correct += 1
+#print('测试集准确率为：{}%'.format(correct*100/len(test_true)))
 
 #预测部分
 model.eval()
@@ -176,8 +187,26 @@ with torch.no_grad():
     max_index = torch.argmax(test_predict, dim=1)
     #test_true = data.y[data.test_mask]
     test_true = data.y.to(torch.long)[test_mask]
-correct = 0
-for i in range(len(max_index)):
-    if max_index[i] == test_true[i]:
-        correct += 1
-print('测试集准确率为：{}%'.format(correct*100/len(test_true)))
+test_pred = max_index.cpu().numpy()
+test_true_np = test_true.cpu().numpy()
+
+# 计算多项评估指标
+accuracy = accuracy_score(test_true_np, test_pred)
+precision, recall, f1, _ = precision_recall_fscore_support(test_true_np, test_pred, average='macro')
+cm = confusion_matrix(test_true_np, test_pred)
+
+print('==============================')
+print('测试集评估结果')
+print('==============================')
+print('Accuracy:  {:.2f}%'.format(accuracy * 100))
+print('Precision: {:.4f}'.format(precision))
+print('Recall:    {:.4f}'.format(recall))
+print('F1 (macro): {:.4f}'.format(f1))
+print('------------------------------')
+print('混淆矩阵 (行=真实, 列=预测):')
+print(cm)
+print('==============================')
+
+# 训练过程参数变化可视化（按回车后显示图表）
+input('\n按回车键查看训练指标曲线图...')
+plot_metrics(precisions, recalls, f1s, losses)
