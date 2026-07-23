@@ -54,7 +54,7 @@ def BLJJ(stockDic, period = 30):
         for i in range(len(pre_ema_list)-1):
             J1 = (REF(pre_ema_list, i) - REF(pre_ema_list, i + 1)) / REF(pre_ema_list, i + 1) * 100
             J2 = (REF(pre_ema_list, i + 1) - REF(pre_ema_list, i + 2)) / REF(pre_ema_list, i + 2) * 100
-            DList.append(J1 + J2)
+            DList.append((J1 + J2) / 2)
             KList.append(J1)
             tList.append((list(stockDic.keys())[len(stockDic) - i - 1]))
             closeList.append(stockDic[(list(stockDic.keys())[len(stockDic) - i - 1])]["close"])

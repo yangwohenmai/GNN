@@ -114,7 +114,7 @@ def TrainDataMACD(stockPriceDic):
     list3 = list()
     list3.append(list1)
     list3.append(list2)
-    edge_index = torch.tensor(np.array(list3), dtype=torch.long)
+    edge_index = torch.tensor(np.array(list3))
     #print(edge_index)
     
     dataListx = list()
@@ -123,7 +123,6 @@ def TrainDataMACD(stockPriceDic):
     dayCount = 0
     for key,f in stockPriceDic.items():
         dayCount += 1
-        # 注意：flag 保留供邻居节点通过图边获取历史信号，但残差路径不引用任何当天字段（见Net.forward）
         dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float(f['pctChg']),dayCount/len(stockPriceDic),f['flag']])
         dataListy.append(f['flag'])
 
