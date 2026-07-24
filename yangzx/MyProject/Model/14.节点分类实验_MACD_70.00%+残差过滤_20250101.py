@@ -37,24 +37,26 @@ from DataBase import StockData
 from DataBase import TrainData
 
 #参数
-dropoutRate = 0.2
-trainingTimes = 1000 #训练轮次
+dropoutRate = 0.1
+trainingTimes = 2000 #训练轮次
 printInterval = 30   #训练参数打印间隔
 ifOpenNormalize = False #是否启用归一化（不开）
 ifOpenEarlyStop = True    #是否启用早停（不开）
-earlyStopPatience = 200   #连续多少轮验证F1未提升则停止
-ifOpenLRScheduler = True  #是否启用学习率自动调整
+earlyStopPatience = 300   #连续多少轮验证F1未提升则停止
+ifOpenLRScheduler = False  #是否启用学习率自动调整
 lrPatience = 100           #验证F1多少轮未提升则降低学习率
 lrFactor = 0.5             #每次降低到原来的比例
 ifOpenEdgeDropout = False     #是否启用边Dropout
 edgeDropoutRate = 0.2         #边Dropout丢弃率
 ifOpenClassWeight = False    #是否启用类别加权损失
 ifOpenBatchNorm = False      #是否启用BatchNorm
+ifOpenFocalLoss = False       #是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
+focalLossGamma = 1.0         #Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
 
 
 lg = bs.login()
-#stockPoolList = StockPool.GetStockPool('',False,'')
-stockPriceDic = StockData.GetStockPriceDWMBaostock('000001.SZ', "20250101", 1400)
+#stockPoolList = StockPool.GetStockPool('',False,'')20250101
+stockPriceDic = StockData.GetStockPriceDWMBaostock('000001.SZ', "20250201", 1400)
 # 获取MACD数据 MainFuncBS:数据源baostock; MainFunc:数据源TS;
 resultBLJJ = Strategy_BLJJ.GetBLJJFunc('000001.SZ', stockPriceDic, 1450, int(len(stockPriceDic)*0.9), "D", "close")["BLJJDic"]
 #resultBLJJ = Strategy_BLJJ.MainFuncBS('000001.SZ', "20241101", 1450, len(stockPriceDic), "D", "close")["BLJJDic"]
@@ -151,9 +153,11 @@ def log_training_progress(epoch, loss, model, data, train_mask, val_mask, traini
         # 验证集指标
         predicted_val = torch.argmax(out_val[val_mask], dim=1)
         p_val, r_val, f1_val, _ = precision_recall_fscore_support(data.y.to(torch.long)[val_mask].cpu(), predicted_val.cpu(), average='macro')
+        acc_val = accuracy_score(data.y.to(torch.long)[val_mask].cpu(), predicted_val.cpu())
         # 训练集指标
         predicted_tr = torch.argmax(out_val[train_mask], dim=1)
-        _, _, f1_tr, _ = precision_recall_fscore_support(data.y.to(torch.long)[train_mask].cpu(), predicted_tr.cpu(), average='macro')
+        p_tr, r_tr, f1_tr, _ = precision_recall_fscore_support(data.y.to(torch.long)[train_mask].cpu(), predicted_tr.cpu(), average='macro')
+        acc_tr = accuracy_score(data.y.to(torch.long)[train_mask].cpu(), predicted_tr.cpu())
 
     is_best = ""
     if f1_val > best_f1:
@@ -161,11 +165,9 @@ def log_training_progress(epoch, loss, model, data, train_mask, val_mask, traini
         is_best = " *"
 
     if (epoch + 1) % printInterval == 0 or epoch == 0:
-        print(f"[{epoch+1:4d}/{trainingTimes}] "
-              f"loss={loss.item():.4f} | "
-              f"train_F1={f1_tr:.4f} | "
-              f"val_Precision={p_val:.4f} val_Recall={r_val:.4f} val_F1={f1_val:.4f}"
-              f"{is_best}")
+        print(f"[{epoch+1:4d}/{trainingTimes}] loss={loss.item():.4f} | "
+              f"train[Acc={acc_tr:.4f} P={p_tr:.4f} R={r_tr:.4f} F1={f1_tr:.4f}] | "
+              f"val[Acc={acc_val:.4f} P={p_val:.4f} R={r_val:.4f} F1={f1_val:.4f}]{is_best}")
 
     return p_val, r_val, f1_val, best_f1
 
@@ -213,6 +215,26 @@ def create_scheduler(optimizer, ifOpen, patience=100, factor=0.5):
     return torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=factor, patience=patience)
 
+# Focal Loss：动态聚焦难分样本，比类别加权更强地对抗类别塌缩
+# FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+class FocalLoss(torch.nn.Module):
+    def __init__(self, alpha=None, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha  # 类别权重张量，shape [num_classes]
+        self.gamma = gamma  # 聚焦参数
+
+    def forward(self, log_probs, targets):
+        probs = torch.exp(log_probs)
+        targets = targets.long()
+        p_t = probs[range(len(targets)), targets]
+        focal_weight = (1 - p_t) ** self.gamma
+        if self.alpha is not None:
+            alpha_t = self.alpha[targets]
+            loss = -alpha_t * focal_weight * log_probs[range(len(targets)), targets]
+        else:
+            loss = -focal_weight * log_probs[range(len(targets)), targets]
+        return loss.mean()
+
 #print(data.x)
 #print(data.y)
 #print(data.x[0].tolist())
@@ -224,77 +246,107 @@ class Net(torch.nn.Module):
     def __init__(self):
         super(Net, self).__init__()
         # add_self_loops=False：确保预测第N天时只使用前N-1天数据，节点i只聚合邻居i-1的特征
+        # 10层网络：5个Block，每2层一个Block，维度平滑过渡 7→32→32→64→64→128→128→128→128→64→2
         self.conv1 = GCNConv(7, 32, add_self_loops=False)
-        self.conv2 = GATConv(32, 64, add_self_loops=False)
-        self.conv3 = GCNConv(64, 128, add_self_loops=False)
-        self.conv4 = GATConv(128, 128, add_self_loops=False)
-        self.conv5 = GCNConv(128, 128, add_self_loops=False)
-        self.conv6 = GCNConv(128, 64, add_self_loops=False)
-        self.conv7 = GATConv(64, 2, add_self_loops=False)
+        self.conv2 = GATConv(32, 32, add_self_loops=False)
+        self.conv3 = GCNConv(32, 64, add_self_loops=False)
+        self.conv4 = GATConv(64, 64, add_self_loops=False)
+        self.conv5 = GCNConv(64, 128, add_self_loops=False)
+        self.conv6 = GATConv(128, 128, add_self_loops=False)
+        self.conv7 = GCNConv(128, 128, add_self_loops=False)
+        self.conv8 = GATConv(128, 128, add_self_loops=False)
+        self.conv9 = GCNConv(128, 64, add_self_loops=False)
+        self.conv10 = GATConv(64, 2, add_self_loops=False)
         self.dropout = torch.nn.Dropout(dropoutRate)
         self.edge_dropout_rate = edgeDropoutRate if ifOpenEdgeDropout else 0.0
-        # 残差投影层：维度不匹配时做线性投影对齐
-        self.proj1 = torch.nn.Linear(2, 32)  # 不含flag维，防止残差路径泄露标签
-        self.proj2 = torch.nn.Linear(32, 64)
-        self.proj3 = torch.nn.Linear(64, 128)
-        self.proj6 = torch.nn.Linear(128, 64)
+        # 短残差投影层（维度不匹配时做线性投影对齐）
+        self.proj1 = torch.nn.Linear(7, 32)    # conv1残差（shifted_x 7维→32维）
+        self.proj3 = torch.nn.Linear(32, 64)   # conv3残差
+        self.proj5 = torch.nn.Linear(64, 128)  # conv5残差
+        self.proj9 = torch.nn.Linear(128, 64)  # conv9残差
         # 是否启用BatchNorm
         if ifOpenBatchNorm:
             self.bn1 = torch.nn.BatchNorm1d(32)
-            self.bn2 = torch.nn.BatchNorm1d(64)
-            self.bn3 = torch.nn.BatchNorm1d(128)
-            self.bn4 = torch.nn.BatchNorm1d(128)
+            self.bn2 = torch.nn.BatchNorm1d(32)
+            self.bn3 = torch.nn.BatchNorm1d(64)
+            self.bn4 = torch.nn.BatchNorm1d(64)
             self.bn5 = torch.nn.BatchNorm1d(128)
-            self.bn6 = torch.nn.BatchNorm1d(64)
-        
+            self.bn6 = torch.nn.BatchNorm1d(128)
+            self.bn7 = torch.nn.BatchNorm1d(128)
+            self.bn8 = torch.nn.BatchNorm1d(128)
+            self.bn9 = torch.nn.BatchNorm1d(64)
+
     def forward(self, x, edge_index):
         #训练时随机丢弃边，防止过度依赖特定邻居
         if self.training and self.edge_dropout_rate > 0:
             edge_index, _ = dropout_edge(edge_index, p=self.edge_dropout_rate)
-        # conv1: 残差连接，维度不同用投影层对齐
-        res = self.proj1(x[:, [0, 5]])  # 残差只用 open(dim0)+时间位置(dim5)，安全维；close/low/high/pctChg/flag 不进残差，防止当天数据泄露
+        # === Block 1: conv1 + conv2（32维平台，含跨层残差） ===
+        # conv1: 短残差使用前一日完整特征 x[i-1]（shift排除当日x[i]），防止数据泄露
+        shifted_x = torch.zeros_like(x)
+        shifted_x[1:] = x[:-1]  # shifted_x[i] = x[i-1]，节点0无前驱故为零向量
+        res = self.proj1(shifted_x)
         x = self.conv1(x, edge_index)
-        if ifOpenBatchNorm:
-            x = self.bn1(x)
+        if ifOpenBatchNorm: x = self.bn1(x)
         x = F.relu(x + res)
         x = self.dropout(x)
-        # conv2: 残差连接，维度不同用投影层对齐
-        res = self.proj2(x)
+        skip1 = x  # conv1输出(32维)，供Block1跨层残差使用
+        # conv2: 短残差(32→32直接相加) + 跨层残差(conv1输出→conv2输出, 32→32直接相加)
+        res = x
         x = self.conv2(x, edge_index)
-        if ifOpenBatchNorm:
-            x = self.bn2(x)
-        x = F.relu(x + res)
+        if ifOpenBatchNorm: x = self.bn2(x)
+        x = F.relu(x + res + skip1)
         x = self.dropout(x)
-        # conv3: 残差连接，维度不同用投影层对齐
+        # === Block 2: conv3 + conv4（64维平台，含跨层残差） ===
+        # conv3: 短残差
         res = self.proj3(x)
         x = self.conv3(x, edge_index)
-        if ifOpenBatchNorm:
-            x = self.bn3(x)
+        if ifOpenBatchNorm: x = self.bn3(x)
         x = F.relu(x + res)
         x = self.dropout(x)
-        # conv4: 残差连接，维度相同直接相加
+        skip3 = x  # conv3输出(64维)，供Block2跨层残差使用
+        # conv4: 短残差(64→64直接相加) + 跨层残差(conv3输出→conv4输出, 64→64直接相加)
         res = x
         x = self.conv4(x, edge_index)
-        if ifOpenBatchNorm:
-            x = self.bn4(x)
-        x = F.relu(x + res)
+        if ifOpenBatchNorm: x = self.bn4(x)
+        x = F.relu(x + res + skip3)
         x = self.dropout(x)
-        # conv5: 残差连接，维度相同直接相加
-        res = x
+        # === Block 3: conv5 + conv6（128维平台，含跨层残差） ===
+        # conv5: 短残差
+        res = self.proj5(x)
         x = self.conv5(x, edge_index)
-        if ifOpenBatchNorm:
-            x = self.bn5(x)
+        if ifOpenBatchNorm: x = self.bn5(x)
         x = F.relu(x + res)
         x = self.dropout(x)
-        # conv6: 残差连接，维度不同用投影层对齐
-        res = self.proj6(x)
+        skip5 = x  # conv5输出(128维)，供Block3跨层残差使用
+        # conv6: 短残差(128→128直接相加) + 跨层残差(conv5输出→conv6输出, 128→128直接相加)
+        res = x
         x = self.conv6(x, edge_index)
-        if ifOpenBatchNorm:
-            x = self.bn6(x)
+        if ifOpenBatchNorm: x = self.bn6(x)
+        x = F.relu(x + res + skip5)
+        x = self.dropout(x)
+        # === Block 4: conv7 + conv8（128维平台，含跨层残差） ===
+        # conv7: 短残差(128→128直接相加)
+        res = x
+        x = self.conv7(x, edge_index)
+        if ifOpenBatchNorm: x = self.bn7(x)
         x = F.relu(x + res)
         x = self.dropout(x)
-        # conv7: 输出层，不加残差
-        x = self.conv7(x, edge_index)
+        skip7 = x  # conv7输出(128维)，供Block4跨层残差使用
+        # conv8: 短残差 + 跨层残差(conv7输出→conv8输出, 128→128直接相加)
+        res = x
+        x = self.conv8(x, edge_index)
+        if ifOpenBatchNorm: x = self.bn8(x)
+        x = F.relu(x + res + skip7)
+        x = self.dropout(x)
+        # === Block 5: conv9 + conv10（降维+输出） ===
+        # conv9: 短残差
+        res = self.proj9(x)
+        x = self.conv9(x, edge_index)
+        if ifOpenBatchNorm: x = self.bn9(x)
+        x = F.relu(x + res)
+        x = self.dropout(x)
+        # conv10: 输出层，不加残差
+        x = self.conv10(x, edge_index)
         return F.log_softmax(x, dim=1)
 
 set_seed(2)
@@ -316,6 +368,9 @@ else:
     class_weight_tensor = None
 # 定义学习率调度器
 scheduler = create_scheduler(optimizer, ifOpenLRScheduler, lrPatience, lrFactor)
+focal_loss_fn = FocalLoss(alpha=class_weight_tensor, gamma=focalLossGamma) if ifOpenFocalLoss else None
+if ifOpenFocalLoss:
+    print(f'Focal Loss已启用: gamma={focalLossGamma}, alpha={class_weight_tensor}')
 
 # 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
 precisions, recalls, f1s, losses = [], [], [], []
@@ -329,7 +384,10 @@ for epoch in range(trainingTimes):
     optimizer.zero_grad()
     out = model(data.x.to(torch.float32), data.edge_index)    #模型的输入有节点特征还有边特征,使用的是全部数据
     #loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])   #损失仅仅计算的是训练集的损失
-    loss = F.nll_loss(out[train_mask], data.y.to(torch.long)[train_mask], weight=class_weight_tensor)   #损失仅仅计算的是训练集的损失
+    if focal_loss_fn is not None:
+        loss = focal_loss_fn(out[train_mask], data.y.to(torch.long)[train_mask])
+    else:
+        loss = F.nll_loss(out[train_mask], data.y.to(torch.long)[train_mask], weight=class_weight_tensor)   #损失仅仅计算的是训练集的损失
     losses.append(loss.item())
     loss.backward()
     optimizer.step()
@@ -396,6 +454,6 @@ print(cm)
 print('==============================')
 
 # 训练过程参数变化可视化（按回车后显示图表）
-input('\n按回车键查看训练指标曲线图...')
-plot_metrics(precisions, recalls, f1s, losses)
+#input('\n按回车键查看训练指标曲线图...')
+#plot_metrics(precisions, recalls, f1s, losses)
 bs.logout()
