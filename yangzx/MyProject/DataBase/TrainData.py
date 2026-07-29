@@ -130,6 +130,42 @@ def TrainDataMACD(stockPriceDic):
     data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
     return data
 
+def TrainDataMACDWindowK(stockPriceDic, edgeWindowK=3, edgeStride=1):
+    # K窗口入边版本（新函数，老函数TrainDataMACD保留用于对比实验）
+    # 每个节点i接收前edgeWindowK个相邻节点的边：X[i-K]~X[i-1] -> X[i]
+    # edgeWindowK=1时等价于TrainDataMACD的单链结构
+    # edgeStride控制边的稀疏性：从最近的X[i-1]开始每隔stride取一个，即偏移j∈{1, 1+s, 1+2s, ...}且j≤K
+    # 例：K=3、stride=2时 j∈{1,3}，即X[i-3]、X[i-1] -> X[i]；stride=1为稠密窗口（原行为）
+    # 开头节点采用部分窗口（有多少历史连多少），避免无入边节点在add_self_loops=False下卷积输出全零
+    # 构建关系矩阵 1.特征矩阵 2.节点关系矩阵 3.权重矩阵
+    list1 = list()
+    list2 = list()
+    count = len(stockPriceDic)
+    for i in range(1, count):
+        for j in range(min(i, edgeWindowK), 0, -1):
+            if (j - 1) % edgeStride != 0:
+                continue
+            list1.append(i-j)
+            list2.append(i)
+    list3 = list()
+    list3.append(list1)
+    list3.append(list2)
+    edge_index = torch.tensor(np.array(list3), dtype=torch.long)
+    #print(edge_index)
+
+    dataListx = list()
+    dataListy = list()
+    data = list()
+    dayCount = 0
+    for key,f in stockPriceDic.items():
+        dayCount += 1
+        # 注意：flag 保留供邻居节点通过图边获取历史信号，但残差路径不引用任何当天字段（见Net.forward）
+        dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float(f['pctChg']),dayCount/len(stockPriceDic),f['flag']])
+        dataListy.append(f['flag'])
+
+    data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
+    return data
+
 # 主函数
 if __name__ == '__main__':
     import StockPool

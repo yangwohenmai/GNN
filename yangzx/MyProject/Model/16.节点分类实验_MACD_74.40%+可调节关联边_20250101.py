@@ -37,30 +37,32 @@ from DataBase import StockData
 from DataBase import TrainData
 
 #参数
-# 最优参数 20250101 residualHistoryN = 5 1400 ifOpenNormalize = True
+# 最优参数 dropoutRate = 0.1 20250101 residualHistoryN = 5 1400 ifOpenNormalize = True
+stockCode = '000001.SZ'
 dropoutRate = 0.1
-trainingTimes = 2000 #训练轮次
-printInterval = 30   #训练参数打印间隔
-ifOpenNormalize = True #是否启用归一化（不开）
-ifOpenEarlyStop = True    #是否启用早停（不开）
-earlyStopPatience = 800   #连续多少轮验证F1未提升则停止
-ifOpenLRScheduler = False  #是否启用学习率自动调整
-lrPatience = 100           #验证F1多少轮未提升则降低学习率
-lrFactor = 0.5             #每次降低到原来的比例
-ifOpenEdgeDropout = False     #是否启用边Dropout
-edgeDropoutRate = 0.2         #边Dropout丢弃率
-ifOpenClassWeight = False    #是否启用类别加权损失
-ifOpenBatchNorm = False      #是否启用BatchNorm
-ifOpenFocalLoss = False       #是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
-focalLossGamma = 1.0         #Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
+trainingTimes = 3000        #训练轮次
+printInterval = 30          #训练参数打印间隔
+ifOpenNormalize = True     #是否启用归一化（不开）
+ifOpenEarlyStop = True      #是否启用早停（不开）
+earlyStopPatience = 800     #连续多少轮验证F1未提升则停止
+ifOpenLRScheduler = False   #是否启用学习率自动调整
+lrPatience = 100            #验证F1多少轮未提升则降低学习率
+lrFactor = 0.5              #每次降低到原来的比例
+ifOpenEdgeDropout = False   #是否启用边Dropout
+edgeDropoutRate = 0.2       #边Dropout丢弃率
+ifOpenClassWeight = False   #是否启用类别加权损失
+ifOpenBatchNorm = False     #是否启用BatchNorm
+ifOpenFocalLoss = False     #是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
+focalLossGamma = 1.0        #Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
 residualHistoryN = 5        #短残差历史窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影）
+edgeWindowK = 1             #入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
+edgeStride = 1              #入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
 
 
 lg = bs.login()
-#stockPoolList = StockPool.GetStockPool('',False,'')20250101 residualHistoryN = 5 1400
-stockPriceDic = StockData.GetStockPriceDWMBaostock('000001.SZ', "20250101", 1400)
+stockPriceDic = StockData.GetStockPriceDWMBaostock(stockCode, "20250101", 1400)
 # 获取MACD数据 MainFuncBS:数据源baostock; MainFunc:数据源TS;
-resultBLJJ = Strategy_BLJJ.GetBLJJFunc('000001.SZ', stockPriceDic, 1450, int(len(stockPriceDic)*0.9), "D", "close")["BLJJDic"]
+resultBLJJ = Strategy_BLJJ.GetBLJJFunc(stockCode, stockPriceDic, 1450, int(len(stockPriceDic)*0.9), "D", "close")["BLJJDic"]
 #resultBLJJ = Strategy_BLJJ.MainFuncBS('000001.SZ', "20241101", 1450, len(stockPriceDic), "D", "close")["BLJJDic"]
 #resultBLJJ = Strategy_BLJJ.MainFunc('000001.SZ', "20241101", 1450, len(stockPriceDic), "D", "close")["BLJJDic"]
 if resultBLJJ == False:
@@ -78,7 +80,8 @@ for key,f in stockPriceDic.items():
             newStockPriceDic[key]['flag'] = flag
 stockPriceDic = newStockPriceDic
 # 构建图结构
-data = TrainData.TrainDataMACD(stockPriceDic)[0]
+#data = TrainData.TrainDataMACD(stockPriceDic)[0]  #老函数：单链结构（保留用于对比实验）
+data = TrainData.TrainDataMACDWindowK(stockPriceDic, edgeWindowK, edgeStride)[0]  #新函数：K窗口入边结构（edgeStride控制稀疏间隔）
 split_train = int(len(stockPriceDic)*0.75)
 split_val = int(len(stockPriceDic)*0.85)
 train_mask=[]
@@ -383,6 +386,7 @@ if ifOpenFocalLoss:
     print(f'Focal Loss已启用: gamma={focalLossGamma}, alpha={class_weight_tensor}')
 if residualHistoryN > 1:
     print(f'短残差历史窗口: {residualHistoryN}步拼接（维度 {7*residualHistoryN}→32）')
+print(f'入边窗口: K={edgeWindowK}, 稀疏间隔={edgeStride}（每节点直接聚合前{edgeWindowK}天内隔{edgeStride}取一，边数={data.edge_index.shape[1]}）')
 
 # 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
 precisions, recalls, f1s, losses = [], [], [], []
