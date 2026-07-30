@@ -159,10 +159,14 @@ def TrainDataMACDWindowK(stockPriceDic, edgeWindowK=3, edgeStride=1):
     dayCount = 0
     for key,f in stockPriceDic.items():
         dayCount += 1
-        # 注意：flag 保留供邻居节点通过图边获取历史信号，但残差路径不引用任何当天字段（见Net.forward）
-        dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float(f['pctChg']),dayCount/len(stockPriceDic),f['flag']])
-        dataListy.append(f['flag'])
-
+        try:
+            # 注意：flag 保留供邻居节点通过图边获取历史信号，但残差路径不引用任何当天字段（见Net.forward）
+            dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float(f['pctChg']),dayCount/len(stockPriceDic),f['flag']])
+            dataListy.append(f['flag'])
+        except Exception as ex:
+            dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float('0'),dayCount/len(stockPriceDic),f['flag']])
+            dataListy.append(f['flag'])
+            print("TrainDataMACDWindowK()->异常交易数据，涨幅补0，异常信息："+str(ex))
     data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
     return data
 

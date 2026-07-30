@@ -65,10 +65,12 @@ def GetHS300StockListBaostock():
     while (rs.error_code == '0') & rs.next():
         # 获取一条记录，将记录合并在一起
         hs300_stocks.append(rs.get_row_data())
-    df = pd.DataFrame(hs300_stocks, columns=rs.fields)
+    #df = pd.DataFrame(hs300_stocks, columns=rs.fields)
     allstocklistdic = dict()
     allstocklistdic1 = dict()
-    for col in df.values:
+    #for col in df.values:
+    for col in hs300_stocks:
+        hs300_stocks
         codeArray = col[1].upper().split('.')
         code = codeArray[1]+'.'+codeArray[0]
         allstocklistdic[code] = codeArray[1]
@@ -84,10 +86,11 @@ def GetZZ500StockListBaostock():
     while (rs.error_code == '0') & rs.next():
         # 获取一条记录，将记录合并在一起
         zz500_stocks.append(rs.get_row_data())
-    df = pd.DataFrame(zz500_stocks, columns=rs.fields)
+    # df = pd.DataFrame(zz500_stocks, columns=rs.fields)
     allstocklistdic = dict()
     allstocklistdic1 = dict()
-    for col in df.values:
+    #for col in df.values:
+    for col in zz500_stocks:
         codeArray = col[1].upper().split('.')
         code = codeArray[1]+'.'+codeArray[0]
         allstocklistdic[code] = codeArray[1]
@@ -97,9 +100,9 @@ def GetZZ500StockListBaostock():
 # 获取当日所有股票列表（baostock）
 # 缺少包含：not like '900%' and  SYMBOL not like '200%' and  SYMBOL not like '299%'  and  SYMBOL not in(201872)
 # 多余包含：like '399%' and like 'sh.000%'
-def GetALLStockListBaostock():
+def GetALLStockListBaostock(dataDate='2024-03-01'):
     # 获取中证500成分股
-    rs = bs.query_all_stock(day='2024-03-01')
+    rs = bs.query_all_stock(day=dataDate)
     allDataList = []
     while (rs.error_code == '0') & rs.next():
         code = rs.get_row_data()

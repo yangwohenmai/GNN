@@ -4,6 +4,7 @@ import copy
 from torch_geometric.nn import GCNConv
 from torch_geometric.nn import GATConv
 from torch_geometric.utils import dropout_edge
+from torch_geometric.data import Batch
 import baostock as bs
 import os
 import sys
@@ -38,33 +39,36 @@ sys.path.append('..')
 from DataBase import StockPool
 from DataBase import StockData
 from DataBase import TrainData
+from Helper import LogHelper
 
 #参数
 # 最优参数 dropoutRate = 0.1 20250101 residualHistoryN = 5 1400 ifOpenNormalize = True
 stockCode = '000001.SZ'
-dropoutRate = 0.1
-trainingTimes = 3000        #训练轮次
-printInterval = 30          #训练参数打印间隔
-ifOpenNormalize = True      #是否启用归一化（不开）
-ifOpenEarlyStop = True      #是否启用早停（不开）
-earlyStopPatience = 800     #连续多少轮验证F1未提升则停止
-ifOpenLRScheduler = False   #是否启用学习率自动调整
-lrPatience = 100            #验证F1多少轮未提升则降低学习率
-lrFactor = 0.5              #每次降低到原来的比例
-ifOpenEdgeDropout = False   #是否启用边Dropout
-edgeDropoutRate = 0.2       #边Dropout丢弃率
-ifOpenClassWeight = False   #是否启用类别加权损失
-ifOpenBatchNorm = False     #是否启用BatchNorm
-ifOpenFocalLoss = False     #是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
-focalLossGamma = 1.0        #Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
-residualHistoryN = 5        #短残差历史窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影）
-edgeWindowK = 1             #入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
-edgeStride = 1              #入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
-ifOpenHyperSearch = True   #是否启用超参数随机搜索（开启后搜索空间内参数的全局值失效，自动寻找最佳组合）
-hyperSearchTrials = 50      #随机搜索采样组数
+dataDate = "20250101"
+maxStockCount = 30          # 最大处理股票数（None=不限制，建议先小规模验证再扩大）
+dropoutRate = 0.1           # Dropout率
+trainingTimes = 3000        # 训练轮次
+printInterval = 30          # 训练参数打印间隔
+ifOpenNormalize = True      # 是否启用归一化（不开）
+ifOpenEarlyStop = True      # 是否启用早停（不开）
+earlyStopPatience = 800     # 连续多少轮验证F1未提升则停止
+ifOpenLRScheduler = False   # 是否启用学习率自动调整
+lrPatience = 100            # 验证F1多少轮未提升则降低学习率
+lrFactor = 0.5              # 每次降低到原来的比例
+ifOpenEdgeDropout = False   # 是否启用边Dropout
+edgeDropoutRate = 0.2       # 边Dropout丢弃率
+ifOpenClassWeight = False   # 是否启用类别加权损失
+ifOpenBatchNorm = False     # 是否启用BatchNorm
+ifOpenFocalLoss = False     # 是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
+focalLossGamma = 1.0        # Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
+residualHistoryN = 5        # 短残差历史窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影）
+edgeWindowK = 1             # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
+edgeStride = 1              # 入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
+ifOpenHyperSearch = True    # 是否启用超参数随机搜索（开启后搜索空间内参数的全局值失效，自动寻找最佳组合）
+hyperSearchTrials = 10      # 随机搜索采样组数
 hyperSearchTrainingTimes = 3000  #搜索阶段每组训练轮次（短轮次快速筛选，选出最佳组合后再用trainingTimes完整训练）
-hyperSearchSpace = {        #搜索空间：参数名→候选值列表（可自行增删候选值）
-    'ifOpenNormalize':   [True, False],
+hyperSearchSpace = {        # 搜索空间：参数名→候选值列表（可自行增删候选值）
+    'ifOpenNormalize':   [True],            #[True, False],
     'ifOpenClassWeight': [False],           #[True, False],
     'ifOpenBatchNorm':   [False],           #[True, False],
     'residualHistoryN':  [1, 3, 5, 8],
@@ -75,49 +79,44 @@ hyperSearchSpace = {        #搜索空间：参数名→候选值列表（可自
     'edgeDropoutRate':   [0.2],             #[0.1, 0.2, 0.3],
     'ifOpenFocalLoss':   [False],           #[True, False],
     'focalLossGamma':    [1.0],             #[1.0, 2.0],
+    'earlyStopPatience': [200]              #[50, 100, 200]搜索阶段用小patience加速（单次训练模式用全局earlyStopPatience=800）
 }
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #运行设备：有GPU用cuda，否则用cpu
 
 
 lg = bs.login()
-stockPriceDic = StockData.GetStockPriceDWMBaostock(stockCode, "20250101", 1400)
-# 获取MACD数据 MainFuncBS:数据源baostock; MainFunc:数据源TS;
-resultBLJJ = Strategy_BLJJ.GetBLJJFunc(stockCode, stockPriceDic, 1450, int(len(stockPriceDic)*0.9), "D", "close")["BLJJDic"]
-#resultBLJJ = Strategy_BLJJ.MainFuncBS('000001.SZ', "20241101", 1450, len(stockPriceDic), "D", "close")["BLJJDic"]
-#resultBLJJ = Strategy_BLJJ.MainFunc('000001.SZ', "20241101", 1450, len(stockPriceDic), "D", "close")["BLJJDic"]
-if resultBLJJ == False:
-    print("指标数据出错")
-# 根据结果获取信号状态区间
-buyAndSellPeriod = TradeTag.TimeLineBuyAndSellPeriod(resultBLJJ['tList'], resultBLJJ['buyDateDic'], resultBLJJ['sellDateDic'], resultBLJJ['longList'], resultBLJJ['shortList'])
-# 匹配信号状态到每个交易日
-newStockPriceDic = dict()
-for key,f in stockPriceDic.items():
-    date_obj = datetime.strptime(key, "%Y-%m-%d").strftime("%Y%m%d")
-    if date_obj in buyAndSellPeriod['flagDic']:
-        flag = buyAndSellPeriod['flagDic'][date_obj]
-        if flag != -1:
-            newStockPriceDic[key] = stockPriceDic[key]
-            newStockPriceDic[key]['flag'] = flag
-stockPriceDic = newStockPriceDic
-# 构建图结构已移入run_training函数（edgeStride属于可搜索超参数，需按配置逐次建图）
-split_train = int(len(stockPriceDic)*0.75)
-split_val = int(len(stockPriceDic)*0.85)
-train_mask=[]
-test_mask=[]
-val_mask=[]
-for i in range(0,len(stockPriceDic)):
-    if i < split_train:
-        train_mask.append(True)
-        test_mask.append(False)
-        val_mask.append(False)
-    elif i>=split_train and i<split_val:
-        train_mask.append(False)
-        val_mask.append(True)
-        test_mask.append(False)
-    else:
-        train_mask.append(False)
-        test_mask.append(True)
-        val_mask.append(False)
+
+# 多股票预处理：每只股票独立处理（行情→BLJJ→flag→过滤→mask），收集后供run_training拼接成大图
+def process_single_stock(code, endDate, period=1400):
+    """
+    处理单只股票：拉行情 → BLJJ → flag标注 → 过滤空窗 → mask构建
+    :return: (priceDic, train_mask, val_mask, test_mask, code) 或 None（失败时）
+    """
+    stockPriceDic = StockData.GetStockPriceDWMBaostock(code, endDate, period)
+    if stockPriceDic is False or len(stockPriceDic) < 50:
+        return None
+    resultBLJJ = Strategy_BLJJ.GetBLJJFunc(code, stockPriceDic, 1450, int(len(stockPriceDic)*0.9), "D", "close")["BLJJDic"]
+    if resultBLJJ == False:
+        return None
+    buyAndSellPeriod = TradeTag.TimeLineBuyAndSellPeriod(resultBLJJ['tList'], resultBLJJ['buyDateDic'], resultBLJJ['sellDateDic'], resultBLJJ['longList'], resultBLJJ['shortList'])
+    newStockPriceDic = dict()
+    for key, f in stockPriceDic.items():
+        date_obj = datetime.strptime(key, "%Y-%m-%d").strftime("%Y%m%d")
+        if date_obj in buyAndSellPeriod['flagDic']:
+            flag = buyAndSellPeriod['flagDic'][date_obj]
+            if flag != -1:
+                newStockPriceDic[key] = stockPriceDic[key]
+                newStockPriceDic[key]['flag'] = flag
+    if len(newStockPriceDic) < 50:
+        return None
+    split_train = int(len(newStockPriceDic) * 0.75)
+    split_val = int(len(newStockPriceDic) * 0.85)
+    train_mask, val_mask, test_mask = [], [], []
+    for i in range(len(newStockPriceDic)):
+        train_mask.append(i < split_train)
+        val_mask.append(split_train <= i < split_val)
+        test_mask.append(i >= split_val)
+    return newStockPriceDic, train_mask, val_mask, test_mask, code
 
 # 特征标准化（仅用训练集统计量，防止测试集信息泄露）
 def normalize_features(data, train_mask):
@@ -385,18 +384,26 @@ class Net(torch.nn.Module):
         return F.log_softmax(x, dim=1)
 
 # 按超参数配置执行一次完整流程：建图→归一化→建模→训练(早停)→测试评估
-def run_training(cfg, quiet=False, epochs=None):
+def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     """
     :param cfg: 超参数字典（含搜索空间的10个参数）
+    :param stock_data_list: 多股票预处理结果列表，每个元素为(priceDic, train_mask, val_mask, test_mask, code)
     :param quiet: True时静默运行（超参数搜索阶段用，不打印逐轮日志）
     :param epochs: 训练轮次（None时使用全局trainingTimes）
     :return: dict(best_val_f1/accuracy/precision/recall/f1/cm/model/训练过程指标列表)
     """
     set_seed(2)  # 每组配置从相同随机状态出发，保证公平对比
     epochs = trainingTimes if epochs is None else epochs
-    # 构建图结构（edgeStride为可搜索超参数，按配置建图）
-    #data = TrainData.TrainDataMACD(stockPriceDic)[0]  #老函数：单链结构（保留用于对比实验）
-    data = TrainData.TrainDataMACDWindowK(stockPriceDic, cfg['edgeWindowK'], cfg['edgeStride'])[0]  #新函数：K窗口入边结构（edgeWindowK/edgeStride均为可搜索超参数）
+    # 多股票建图：每只股票按cfg的K/stride独立建图，再拼成一张大图（跨股票无边相连，信息不跨股票流动）
+    data_list = []
+    train_mask, val_mask, test_mask = [], [], []
+    for priceDic, tr_mask, va_mask, te_mask, code in stock_data_list:
+        d = TrainData.TrainDataMACDWindowK(priceDic, cfg['edgeWindowK'], cfg['edgeStride'])[0]
+        data_list.append(d)
+        train_mask.extend(tr_mask)
+        val_mask.extend(va_mask)
+        test_mask.extend(te_mask)
+    data = Batch.from_data_list(data_list)
     model = Net(cfg).to(device)
     if cfg['ifOpenNormalize'] == True:
         data = normalize_features(data, train_mask) #数据归一化
@@ -418,7 +425,7 @@ def run_training(cfg, quiet=False, epochs=None):
     focal_loss_fn = FocalLoss(alpha=class_weight_tensor, gamma=cfg['focalLossGamma']) if cfg['ifOpenFocalLoss'] else None
     if not quiet:
         print(f'本次训练配置: {cfg}')
-        print(f'全局配置: stockCode={stockCode}, 训练轮次={epochs}, 早停={ifOpenEarlyStop}(patience={earlyStopPatience}), 学习率调度={ifOpenLRScheduler}')
+        print(f'全局配置: 股票数={len(stock_data_list)}, 训练轮次={epochs}, 早停={ifOpenEarlyStop}(patience={cfg.get("earlyStopPatience", earlyStopPatience)}), 学习率调度={ifOpenLRScheduler}')
         if cfg['ifOpenFocalLoss']:
             print(f"Focal Loss已启用: gamma={cfg['focalLossGamma']}, alpha={class_weight_tensor}")
         if cfg['residualHistoryN'] > 1:
@@ -428,7 +435,7 @@ def run_training(cfg, quiet=False, epochs=None):
     # 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
     precisions, recalls, f1s, losses = [], [], [], []
     # 初始化早停控制器
-    early_stopper = EarlyStopper(earlyStopPatience) if ifOpenEarlyStop else None
+    early_stopper = EarlyStopper(cfg.get('earlyStopPatience', earlyStopPatience)) if ifOpenEarlyStop else None
     # 最佳F1初始化，用于记录训练过程中最佳验证F1及其出现轮次
     best_f1 = 0.0
     best_epoch = 0
@@ -523,6 +530,29 @@ def sample_configs(space, nTrials):
         configs.append(cfg)
     return configs
 
+# 遍历码表获取所有股票（每只股票内部按时序75/10/15划分train/val/test，后续拼成大图时各mask拼接）
+date = datetime.fromordinal(datetime.today().toordinal() - (datetime.today().weekday() or 7)).strftime('%Y-%m-%d')
+stockPoolList = StockPool.GetHS300StockListBaostock()
+stock_data_list = []  # 每个元素: (priceDic, train_mask, val_mask, test_mask, code)
+
+dataCount = 0
+for code in StockPool.GetALLStockListBaostock(date).keys():
+    if len(stockPoolList) == 0 or code not in stockPoolList:
+        continue
+    if maxStockCount is not None and dataCount >= maxStockCount:
+        break
+    try:
+        result = process_single_stock(code, dataDate, 1400)
+        if result is not None:
+            stock_data_list.append(result)
+            dataCount += 1
+            print(f'{code} 预处理完成,序号:NO.{dataCount},节点数:{len(result[0])}')
+        else:
+            print(code + ' 数据不足或指标出错,跳过')
+    except Exception as ex:
+        print("失败代码："+code+"，异常信息："+str(ex))
+print(f'共预处理 {len(stock_data_list)} 只股票，总节点数 {sum(len(r[0]) for r in stock_data_list)}')
+
 #主流程：超参数搜索模式 / 单次训练模式
 if ifOpenHyperSearch:
     # 搜索模式下屏蔽sklearn的UndefinedMetricWarning（某类无预测样本时的警告），避免刷屏干扰每组摘要行；单次训练模式不屏蔽
@@ -538,7 +568,7 @@ if ifOpenHyperSearch:
     print(f'========== 超参数随机搜索：共{len(trial_configs)}组，每组{hyperSearchTrainingTimes}轮 ==========')
     trial_results = []
     for idx, cfg in enumerate(trial_configs):
-        r = run_training(cfg, quiet=True, epochs=hyperSearchTrainingTimes)
+        r = run_training(cfg, stock_data_list, quiet=True, epochs=hyperSearchTrainingTimes)
         trial_results.append((r['best_val_f1'], r, cfg))
         print(f"[trial {idx+1:2d}/{len(trial_configs)}] valF1={r['best_val_f1']:.4f}(第{r['best_epoch']}轮) | test[Acc={r['accuracy']:.4f} P={r['precision']:.4f} R={r['recall']:.4f} F1={r['f1']:.4f}] 耗时={r['elapsed']:.0f}s  {cfg}")
     #按验证F1排序选最优（不看testF1，避免用测试集选模型造成评估泄露）
@@ -564,8 +594,9 @@ else:
         'edgeDropoutRate': edgeDropoutRate,
         'ifOpenFocalLoss': ifOpenFocalLoss,
         'focalLossGamma': focalLossGamma,
+        'earlyStopPatience': earlyStopPatience,
     }
-    result = run_training(base_cfg, quiet=False)
+    result = run_training(base_cfg, stock_data_list, quiet=False)
 
 # 训练过程参数变化可视化
 #plot_metrics(result['precisions'], result['recalls'], result['f1s'], result['losses'])

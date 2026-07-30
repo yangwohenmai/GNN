@@ -168,7 +168,7 @@ if __name__ == '__main__':
             continue
         try:
             # 获取行情数据
-            stockPriceDic = GetStockPriceDWMBaostock(code, 0)
+            stockPriceDic = GetStockPriceDWMBaostock(code, "")
             if stockPriceDic == False:
                 print(code+"行情获取失败")
                 continue
