@@ -1,0 +1,62 @@
+600000.SH 预处理完成,序号:NO.1,节点数:832
+600009.SH 预处理完成,序号:NO.2,节点数:831
+600010.SH 预处理完成,序号:NO.3,节点数:837
+600011.SH 预处理完成,序号:NO.4,节点数:837
+600015.SH 预处理完成,序号:NO.5,节点数:829
+600016.SH 预处理完成,序号:NO.6,节点数:837
+600018.SH 预处理完成,序号:NO.7,节点数:837
+600019.SH 预处理完成,序号:NO.8,节点数:836
+600023.SH 预处理完成,序号:NO.9,节点数:837
+600025.SH 预处理完成,序号:NO.10,节点数:836
+600026.SH 预处理完成,序号:NO.11,节点数:833
+600027.SH 预处理完成,序号:NO.12,节点数:833
+600028.SH 预处理完成,序号:NO.13,节点数:836
+600029.SH 预处理完成,序号:NO.14,节点数:828
+600030.SH 预处理完成,序号:NO.15,节点数:837
+600031.SH 预处理完成,序号:NO.16,节点数:829
+600036.SH 预处理完成,序号:NO.17,节点数:836
+600039.SH 预处理完成,序号:NO.18,节点数:831
+600048.SH 预处理完成,序号:NO.19,节点数:836
+600050.SH 预处理完成,序号:NO.20,节点数:831
+600061.SH 预处理完成,序号:NO.21,节点数:836
+600066.SH 预处理完成,序号:NO.22,节点数:832
+600085.SH 预处理完成,序号:NO.23,节点数:831
+600089.SH 预处理完成,序号:NO.24,节点数:831
+600104.SH 预处理完成,序号:NO.25,节点数:829
+600111.SH 预处理完成,序号:NO.26,节点数:837
+600115.SH 预处理完成,序号:NO.27,节点数:828
+600118.SH 预处理完成,序号:NO.28,节点数:834
+600150.SH 预处理完成,序号:NO.29,节点数:829
+600160.SH 预处理完成,序号:NO.30,节点数:833
+共预处理 30 只股票，总节点数 24999
+========== 超参数随机搜索：共10组，每组3000轮 ==========
+[trial  1/10] valF1=0.6780(第267轮) | test[Acc=0.6631 P=0.6651 R=0.6638 F1=0.6626] 耗时=499s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 3, 'edgeWindowK': 1, 'edgeStride': 1, 'dropoutRate': 0.1, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+[trial  2/10] valF1=0.3564(第3轮) | test[Acc=0.4915 P=0.4873 R=0.4978 F1=0.3646] 耗时=418s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 3, 'edgeWindowK': 20, 'edgeStride': 5, 'dropoutRate': 0.4, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+[trial  3/10] valF1=0.7535(第215轮) | test[Acc=0.7561 P=0.7568 R=0.7557 F1=0.7557] 耗时=1410s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 8, 'edgeWindowK': 20, 'edgeStride': 2, 'dropoutRate': 0.2, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+[trial  4/10] valF1=0.7452(第663轮) | test[Acc=0.7436 P=0.7439 R=0.7438 F1=0.7436] 耗时=2681s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 8, 'edgeWindowK': 10, 'edgeStride': 1, 'dropoutRate': 0.2, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+[trial  5/10] valF1=0.6785(第122轮) | test[Acc=0.6655 P=0.6676 R=0.6662 F1=0.6650] 耗时=333s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 1, 'edgeWindowK': 1, 'edgeStride': 1, 'dropoutRate': 0.1, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+[trial  6/10] valF1=0.7256(第231轮) | test[Acc=0.7330 P=0.7330 R=0.7330 F1=0.7330] 耗时=2343s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 1, 'edgeWindowK': 20, 'edgeStride': 1, 'dropoutRate': 0.1, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+[trial  7/10] valF1=0.7211(第749轮) | test[Acc=0.6937 P=0.6960 R=0.6944 F1=0.6932] 耗时=1838s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 1, 'edgeWindowK': 5, 'edgeStride': 1, 'dropoutRate': 0.2, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+[trial  8/10] valF1=0.4669(第5轮) | test[Acc=0.5178 P=0.5181 R=0.5149 F1=0.4941] 耗时=634s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 5, 'edgeWindowK': 10, 'edgeStride': 1, 'dropoutRate': 0.4, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+[trial  9/10] valF1=0.7398(第570轮) | test[Acc=0.7471 P=0.7503 R=0.7462 F1=0.7458] 耗时=1320s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 8, 'edgeWindowK': 20, 'edgeStride': 5, 'dropoutRate': 0.1, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+[trial 10/10] valF1=0.7051(第763轮) | test[Acc=0.6892 P=0.6941 R=0.6902 F1=0.6878] 耗时=1874s  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 8, 'edgeWindowK': 5, 'edgeStride': 1, 'dropoutRate': 0.4, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+------ 搜索结果Top5（按验证F1排序） ------
+valF1=0.7535 testF1=0.7557  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 8, 'edgeWindowK': 20, 'edgeStride': 2, 'dropoutRate': 0.2, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+valF1=0.7452 testF1=0.7436  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 8, 'edgeWindowK': 10, 'edgeStride': 1, 'dropoutRate': 0.2, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+valF1=0.7398 testF1=0.7458  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 8, 'edgeWindowK': 20, 'edgeStride': 5, 'dropoutRate': 0.1, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+valF1=0.7256 testF1=0.7330  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 1, 'edgeWindowK': 20, 'edgeStride': 1, 'dropoutRate': 0.1, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+valF1=0.7211 testF1=0.6932  {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 1, 'edgeWindowK': 5, 'edgeStride': 1, 'dropoutRate': 0.2, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+最佳配置: {'ifOpenNormalize': True, 'ifOpenClassWeight': False, 'ifOpenBatchNorm': False, 'residualHistoryN': 8, 'edgeWindowK': 20, 'edgeStride': 2, 'dropoutRate': 0.2, 'ifOpenEdgeDropout': False, 'edgeDropoutRate': 0.2, 'ifOpenFocalLoss': False, 'focalLossGamma': 1.0, 'earlyStopPatience': 200}
+提示：将最佳配置手动填回参数区并关闭ifOpenHyperSearch，即可单次训练复现（种子固定，结果与搜索时一致，可看逐轮日志与训练曲线）
+==============================
+测试集评估结果
+==============================
+Accuracy:  75.61%
+Precision: 0.7568
+Recall:    0.7557
+F1 (macro): 0.7557
+------------------------------
+混淆矩阵 (行=真实, 列=预测):
+[[1347  509]
+ [ 409 1499]]
+==============================

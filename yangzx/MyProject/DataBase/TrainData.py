@@ -166,7 +166,7 @@ def TrainDataMACDWindowK(stockPriceDic, edgeWindowK=3, edgeStride=1):
         except Exception as ex:
             dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float('0'),dayCount/len(stockPriceDic),f['flag']])
             dataListy.append(f['flag'])
-            print("TrainDataMACDWindowK()->异常交易数据，涨幅补0，异常信息："+str(ex))
+            #print("TrainDataMACDWindowK()->异常交易数据，涨幅补0，异常信息："+str(ex))
     data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
     return data
 

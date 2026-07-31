@@ -42,10 +42,13 @@ from DataBase import TrainData
 from Helper import LogHelper
 
 #参数
-# 最优参数 dropoutRate = 0.1 20250101 residualHistoryN = 5 1400 ifOpenNormalize = True
 stockCode = '000001.SZ'
-dataDate = "20250101"
-maxStockCount = 30          # 最大处理股票数（None=不限制，建议先小规模验证再扩大）
+dataDate = "20250101"       # 训练数据取值范围的截止日期
+periodRange = 1400          # 根据dataDate，向前取多少个自然日
+# 获取最新日期，取出当天所有股票作为股票池（默认取周一的股票池）
+getNewStockPoolByDate = datetime.fromordinal(datetime.today().toordinal() - (datetime.today().weekday() or 7)).strftime('%Y-%m-%d')
+ifOpenMultiStock = True    # 是否启用多股票训练（True=遍历沪深300码表拼大图，False=仅用stockCode单股票训练）
+maxStockCount = 10          # 用多少只股票同时训练（仅多股票模式生效，None=不限制）
 dropoutRate = 0.1           # Dropout率
 trainingTimes = 3000        # 训练轮次
 printInterval = 30          # 训练参数打印间隔
@@ -55,6 +58,7 @@ earlyStopPatience = 800     # 连续多少轮验证F1未提升则停止
 ifOpenLRScheduler = False   # 是否启用学习率自动调整
 lrPatience = 100            # 验证F1多少轮未提升则降低学习率
 lrFactor = 0.5              # 每次降低到原来的比例
+lrMinLr = 1e-5              # 学习率下限（降到此值后不再降低，防止lr过小模型停止学习）
 ifOpenEdgeDropout = False   # 是否启用边Dropout
 edgeDropoutRate = 0.2       # 边Dropout丢弃率
 ifOpenClassWeight = False   # 是否启用类别加权损失
@@ -84,9 +88,7 @@ hyperSearchSpace = {        # 搜索空间：参数名→候选值列表（可�
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #运行设备：有GPU用cuda，否则用cpu
 
 
-lg = bs.login()
-
-# 多股票预处理：每只股票独立处理（行情→BLJJ→flag→过滤→mask），收集后供run_training拼接成大图
+# 股票预处理：每只股票独立处理（行情→BLJJ→flag→过滤→mask），收集后供run_training拼接成大图
 def process_single_stock(code, endDate, period=1400):
     """
     处理单只股票：拉行情 → BLJJ → flag标注 → 过滤空窗 → mask构建
@@ -95,7 +97,7 @@ def process_single_stock(code, endDate, period=1400):
     stockPriceDic = StockData.GetStockPriceDWMBaostock(code, endDate, period)
     if stockPriceDic is False or len(stockPriceDic) < 50:
         return None
-    resultBLJJ = Strategy_BLJJ.GetBLJJFunc(code, stockPriceDic, 1450, int(len(stockPriceDic)*0.9), "D", "close")["BLJJDic"]
+    resultBLJJ = Strategy_BLJJ.GetBLJJFunc(code, stockPriceDic, period+50, int(len(stockPriceDic)*0.9), "D", "close")["BLJJDic"]
     if resultBLJJ == False:
         return None
     buyAndSellPeriod = TradeTag.TimeLineBuyAndSellPeriod(resultBLJJ['tList'], resultBLJJ['buyDateDic'], resultBLJJ['sellDateDic'], resultBLJJ['longList'], resultBLJJ['shortList'])
@@ -164,22 +166,25 @@ def plot_metrics(precisions, recalls, f1s, losses):
     plt.show()
 
 # 记录和打印训练/验证进度
-def log_training_progress(epoch, loss, model, data, train_mask, val_mask, trainingTimes, printInterval=50, best_f1=0):
+def log_training_progress(epoch, loss, model, data, train_mask, val_mask, trainingTimes, printInterval=50, best_f1=0, quiet=False):
     """
-    计算训练/验证指标并格式化输出
+    计算训练/验证指标并格式化输出（quiet模式下跳过训练集指标计算，加速搜索）
     :return: precision_val, recall_val, f1_val, best_f1
     """
     model.eval()
     with torch.no_grad():
-        out_val = model(data.x.to(torch.float32), data.edge_index)
-        # 验证集指标
+        out_val = model(data.x, data.edge_index)
+        # 验证集指标（始终需要，早停依赖验证F1）
         predicted_val = torch.argmax(out_val[val_mask], dim=1)
-        p_val, r_val, f1_val, _ = precision_recall_fscore_support(data.y.to(torch.long)[val_mask].cpu(), predicted_val.cpu(), average='macro')
-        acc_val = accuracy_score(data.y.to(torch.long)[val_mask].cpu(), predicted_val.cpu())
-        # 训练集指标
-        predicted_tr = torch.argmax(out_val[train_mask], dim=1)
-        p_tr, r_tr, f1_tr, _ = precision_recall_fscore_support(data.y.to(torch.long)[train_mask].cpu(), predicted_tr.cpu(), average='macro')
-        acc_tr = accuracy_score(data.y.to(torch.long)[train_mask].cpu(), predicted_tr.cpu())
+        p_val, r_val, f1_val, _ = precision_recall_fscore_support(data.y[val_mask].cpu(), predicted_val.cpu(), average='macro')
+        acc_val = accuracy_score(data.y[val_mask].cpu(), predicted_val.cpu())
+        # 训练中间过程（仅训练单个股票时打印中间过程，批量训练阶段不打印中间过程，省略不算）
+        if not quiet and printInterval > 0 and ((epoch + 1) % printInterval == 0 or epoch == 0):
+            predicted_tr = torch.argmax(out_val[train_mask], dim=1)
+            p_tr, r_tr, f1_tr, _ = precision_recall_fscore_support(data.y[train_mask].cpu(), predicted_tr.cpu(), average='macro')
+            acc_tr = accuracy_score(data.y[train_mask].cpu(), predicted_tr.cpu())
+        else:
+            p_tr = r_tr = f1_tr = acc_tr = 0.0
 
     is_best = ""
     if f1_val > best_f1:
@@ -228,14 +233,14 @@ class EarlyStopper:
         return model
 
 # 学习率调度器
-def create_scheduler(optimizer, ifOpen, patience=100, factor=0.5):
+def create_scheduler(optimizer, ifOpen, patience=100, factor=0.5, min_lr=1e-5):
     """
     创建学习率调度器，返回None表示不启用
     """
     if not ifOpen:
         return None
     return torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=factor, patience=patience)
+        optimizer, mode='max', factor=factor, patience=patience, min_lr=min_lr)
 
 # Focal Loss：动态聚焦难分样本，比类别加权更强地对抗类别塌缩
 # FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
@@ -257,13 +262,7 @@ class FocalLoss(torch.nn.Module):
             loss = -focal_weight * log_probs[range(len(targets)), targets]
         return loss.mean()
 
-#print(data.x)
-#print(data.y)
-#print(data.x[0].tolist())
-#print(data.y.tolist())
-#print(data.edge_index[0].tolist())
-#print(data.edge_index[1].tolist())
-#定义网络架构
+# 定义网络架构
 class Net(torch.nn.Module):
     def __init__(self, cfg):
         """
@@ -383,6 +382,46 @@ class Net(torch.nn.Module):
         x = self.conv10(x, edge_index)
         return F.log_softmax(x, dim=1)
 
+# 单/多股票建图：每只股票按cfg的K/stride独立建图，再拼成一张大图（跨股票无边相连，信息不跨股票流动）
+def build_graph(stock_data_list, cfg):
+    """
+    单/多股票建图：每只股票独立建图后拼成大图，归一化并预转换类型，list中若只有一个股票即为单股票训练模式
+    :return: (data, train_mask, val_mask, test_mask)
+    """
+    data_list = []
+    train_mask, val_mask, test_mask = [], [], []
+    for priceDic, tr_mask, va_mask, te_mask, code in stock_data_list:
+        d = TrainData.TrainDataMACDWindowK(priceDic, cfg['edgeWindowK'], cfg['edgeStride'])[0]
+        data_list.append(d)
+        train_mask.extend(tr_mask)
+        val_mask.extend(va_mask)
+        test_mask.extend(te_mask)
+    data = Batch.from_data_list(data_list)
+    if cfg['ifOpenNormalize']:
+        data = normalize_features(data, train_mask)
+    data = data.to(device)
+    data.x = data.x.to(torch.float32)
+    data.y = data.y.to(torch.long)
+    return data, train_mask, val_mask, test_mask
+
+# 测试集评估：在测试集上计算多项分类指标
+def evaluate_test(model, data, test_mask):
+    """
+    测试集评估，返回指标字典
+    :return: dict(accuracy/precision/recall/f1/cm)
+    """
+    model.eval()
+    with torch.no_grad():
+        test_predict = model(data.x, data.edge_index)[test_mask]
+        max_index = torch.argmax(test_predict, dim=1)
+        test_true = data.y[test_mask]
+    test_pred = max_index.cpu().numpy()
+    test_true_np = test_true.cpu().numpy()
+    accuracy = accuracy_score(test_true_np, test_pred)
+    precision, recall, f1, _ = precision_recall_fscore_support(test_true_np, test_pred, average='macro')
+    cm = confusion_matrix(test_true_np, test_pred)
+    return {'accuracy': accuracy, 'precision': precision, 'recall': recall, 'f1': f1, 'cm': cm}
+
 # 按超参数配置执行一次完整流程：建图→归一化→建模→训练(早停)→测试评估
 def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     """
@@ -394,20 +433,8 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     """
     set_seed(2)  # 每组配置从相同随机状态出发，保证公平对比
     epochs = trainingTimes if epochs is None else epochs
-    # 多股票建图：每只股票按cfg的K/stride独立建图，再拼成一张大图（跨股票无边相连，信息不跨股票流动）
-    data_list = []
-    train_mask, val_mask, test_mask = [], [], []
-    for priceDic, tr_mask, va_mask, te_mask, code in stock_data_list:
-        d = TrainData.TrainDataMACDWindowK(priceDic, cfg['edgeWindowK'], cfg['edgeStride'])[0]
-        data_list.append(d)
-        train_mask.extend(tr_mask)
-        val_mask.extend(va_mask)
-        test_mask.extend(te_mask)
-    data = Batch.from_data_list(data_list)
+    data, train_mask, val_mask, test_mask = build_graph(stock_data_list, cfg)
     model = Net(cfg).to(device)
-    if cfg['ifOpenNormalize'] == True:
-        data = normalize_features(data, train_mask) #数据归一化
-    data = data.to(device)
     # 定义损失函数和优化器
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=0.0005)
     # 类别加权：用训练集统计各类别权重，平衡不平衡样本
@@ -421,7 +448,7 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     else:
         class_weight_tensor = None
     # 定义学习率调度器
-    scheduler = create_scheduler(optimizer, ifOpenLRScheduler, lrPatience, lrFactor)
+    scheduler = create_scheduler(optimizer, ifOpenLRScheduler, lrPatience, lrFactor, lrMinLr)
     focal_loss_fn = FocalLoss(alpha=class_weight_tensor, gamma=cfg['focalLossGamma']) if cfg['ifOpenFocalLoss'] else None
     if not quiet:
         print(f'本次训练配置: {cfg}')
@@ -432,7 +459,6 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
             print(f"短残差历史窗口: {cfg['residualHistoryN']}步拼接（维度 {7*cfg['residualHistoryN']}→32）")
         print(f"入边窗口: K={cfg['edgeWindowK']}, 稀疏间隔={cfg['edgeStride']}（每节点直接聚合前{cfg['edgeWindowK']}天内隔{cfg['edgeStride']}取一，边数={data.edge_index.shape[1]}）")
 
-    # 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
     precisions, recalls, f1s, losses = [], [], [], []
     # 初始化早停控制器
     early_stopper = EarlyStopper(cfg.get('earlyStopPatience', earlyStopPatience)) if ifOpenEarlyStop else None
@@ -441,21 +467,21 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     best_epoch = 0
     #模型训练/验证
     train_start = time.time()   #记录训练开始时间，用于统计耗时
+    # 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
     model.train()
     for epoch in range(epochs):
         optimizer.zero_grad()
-        out = model(data.x.to(torch.float32), data.edge_index)    #模型的输入有节点特征还有边特征,使用的是全部数据
-        #loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])   #损失仅仅计算的是训练集的损失
+        out = model(data.x, data.edge_index)    #模型的输入有节点特征还有边特征,使用的是全部数据
         if focal_loss_fn is not None:
-            loss = focal_loss_fn(out[train_mask], data.y.to(torch.long)[train_mask])
+            loss = focal_loss_fn(out[train_mask], data.y[train_mask])
         else:
-            loss = F.nll_loss(out[train_mask], data.y.to(torch.long)[train_mask], weight=class_weight_tensor)   #损失仅仅计算的是训练集的损失
+            loss = F.nll_loss(out[train_mask], data.y[train_mask], weight=class_weight_tensor)   #损失仅仅计算的是训练集的损失
         losses.append(loss.item())
         loss.backward()
         optimizer.step()
-        #启用验证模式，计算训练/验证指标并输出（quiet时printInterval=0不打印）
+        # 计算训练/验证指标并输出（quiet时printInterval=0不打印）
         prev_best_f1 = best_f1
-        precision_val, recall_val, f1_val, best_f1 = log_training_progress(epoch, loss, model, data, train_mask, val_mask, epochs, 0 if quiet else printInterval, best_f1)
+        precision_val, recall_val, f1_val, best_f1 = log_training_progress(epoch, loss, model, data, train_mask, val_mask, epochs, 0 if quiet else printInterval, best_f1, quiet=quiet)
         if best_f1 > prev_best_f1:
             best_epoch = epoch + 1  #记录最佳验证F1出现的轮次
         precisions.append(precision_val)
@@ -470,7 +496,7 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
         #学习率自动调整
         if scheduler is not None:
             scheduler.step(f1_val)
-        #执行完model.eval()后从新开始train模式
+        #执行完model.eval()后重新开始train模式
         model.train()
 
     #早停模式下恢复最佳模型权重
@@ -485,21 +511,10 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
         print(f"训练完成：最佳验证F1={best_f1:.4f}（第{best_epoch}轮），耗时 {int(train_elapsed//60)}分{train_elapsed%60:.0f}秒")
 
     #测试集评估
-    model.eval()
-    with torch.no_grad():
-        #test_predict = model(data.x, data.edge_index)[data.test_mask]
-        test_predict = model(data.x.to(torch.float32), data.edge_index)[test_mask]
-        max_index = torch.argmax(test_predict, dim=1)
-        #test_true = data.y[data.test_mask]
-        test_true = data.y.to(torch.long)[test_mask]
-    test_pred = max_index.cpu().numpy()
-    test_true_np = test_true.cpu().numpy()
-    # 计算多项评估指标
-    accuracy = accuracy_score(test_true_np, test_pred)
-    precision, recall, f1, _ = precision_recall_fscore_support(test_true_np, test_pred, average='macro')
-    cm = confusion_matrix(test_true_np, test_pred)
-    return {'best_val_f1': best_f1, 'accuracy': accuracy, 'precision': precision, 'recall': recall,
-            'f1': f1, 'cm': cm, 'model': model, 'best_epoch': best_epoch, 'elapsed': train_elapsed,
+    metrics = evaluate_test(model, data, test_mask)
+    return {'best_val_f1': best_f1, 'accuracy': metrics['accuracy'], 'precision': metrics['precision'],
+            'recall': metrics['recall'], 'f1': metrics['f1'], 'cm': metrics['cm'],
+            'model': model, 'best_epoch': best_epoch, 'elapsed': train_elapsed,
             'precisions': precisions, 'recalls': recalls, 'f1s': f1s, 'losses': losses}
 
 # 边参数组合约束：要求edgeStride*2 < edgeWindowK（保证窗口内至少3条入边，避免大量组合退化成单链）
@@ -512,7 +527,7 @@ def valid_edge_combo(cfg):
     return s * 2 < k
 
 # 从搜索空间随机采样不重复的超参数组合
-def sample_configs(space, nTrials):
+def sample_configs(space, nTrials, ensure_baseline=True):
     # 已经抽过的参数组合存起来
     configs = []
     seen = set()
@@ -528,92 +543,107 @@ def sample_configs(space, nTrials):
             continue
         seen.add(key)
         configs.append(cfg)
+    # 强制包含单链基准组合（edgeWindowK=1且edgeStride=1，其余参数沿用第1组），作为窗口结构的对照基准
+    if ensure_baseline and configs:
+        configs[0] = {**configs[0], 'edgeWindowK': 1, 'edgeStride': 1}
     return configs
 
-# 遍历码表获取所有股票（每只股票内部按时序75/10/15划分train/val/test，后续拼成大图时各mask拼接）
-date = datetime.fromordinal(datetime.today().toordinal() - (datetime.today().weekday() or 7)).strftime('%Y-%m-%d')
-stockPoolList = StockPool.GetHS300StockListBaostock()
-stock_data_list = []  # 每个元素: (priceDic, train_mask, val_mask, test_mask, code)
+if __name__ == '__main__':
+    lg = bs.login()
+    # 遍历码表获取所有股票（每只股票内部按时序75/10/15划分train/val/test，后续拼成大图时各mask拼接）
+    stock_data_list = []  # 每个元素: (priceDic, train_mask, val_mask, test_mask, code)
 
-dataCount = 0
-for code in StockPool.GetALLStockListBaostock(date).keys():
-    if len(stockPoolList) == 0 or code not in stockPoolList:
-        continue
-    if maxStockCount is not None and dataCount >= maxStockCount:
-        break
-    try:
-        result = process_single_stock(code, dataDate, 1400)
+    if ifOpenMultiStock:
+        # 多股票模式：遍历沪深300码表，每只股票独立处理后拼成大图
+        stockPoolList = StockPool.GetHS300StockListBaostock()
+        dataCount = 0
+        for code in StockPool.GetALLStockListBaostock(getNewStockPoolByDate).keys():
+            if len(stockPoolList) == 0 or code not in stockPoolList:
+                continue
+            if maxStockCount is not None and dataCount >= maxStockCount:
+                break
+            try:
+                result = process_single_stock(code, dataDate, periodRange)
+                if result is not None:
+                    stock_data_list.append(result)
+                    dataCount += 1
+                    print(f'{code} 预处理完成,序号:NO.{dataCount},节点数:{len(result[0])}')
+                else:
+                    print(code + ' 数据不足或指标出错,跳过')
+            except Exception as ex:
+                print("失败代码："+code+"，异常信息："+str(ex))
+        print(f'共预处理 {len(stock_data_list)} 只股票，总节点数 {sum(len(r[0]) for r in stock_data_list)}')
+    else:
+        # 单股票模式：仅用stockCode构建单只股票的图
+        result = process_single_stock(stockCode, dataDate, periodRange)
         if result is not None:
             stock_data_list.append(result)
-            dataCount += 1
-            print(f'{code} 预处理完成,序号:NO.{dataCount},节点数:{len(result[0])}')
+            print(f'{stockCode} 预处理完成,节点数:{len(result[0])}')
         else:
-            print(code + ' 数据不足或指标出错,跳过')
-    except Exception as ex:
-        print("失败代码："+code+"，异常信息："+str(ex))
-print(f'共预处理 {len(stock_data_list)} 只股票，总节点数 {sum(len(r[0]) for r in stock_data_list)}')
+            print(f'{stockCode} 数据不足或指标出错')
 
-#主流程：超参数搜索模式 / 单次训练模式
-if ifOpenHyperSearch:
-    # 搜索模式下屏蔽sklearn的UndefinedMetricWarning（某类无预测样本时的警告），避免刷屏干扰每组摘要行；单次训练模式不屏蔽
-    warnings.filterwarnings('ignore', category=UndefinedMetricWarning)
-    # 固定采样种子，保证搜索组合可复现（需在run_training重置种子前一次性采样完，采样与训练互不影响）
-    set_seed(2)
-    trial_configs = sample_configs(hyperSearchSpace, hyperSearchTrials)
-    # 强制包含单链基准组合（edgeWindowK=1且edgeStride=1，其余参数沿用第1组），作为窗口结构的对照基准
-    baseline_cfg = dict(trial_configs[0])
-    baseline_cfg['edgeWindowK'] = 1
-    baseline_cfg['edgeStride'] = 1
-    trial_configs[0] = baseline_cfg
-    print(f'========== 超参数随机搜索：共{len(trial_configs)}组，每组{hyperSearchTrainingTimes}轮 ==========')
-    trial_results = []
-    for idx, cfg in enumerate(trial_configs):
-        r = run_training(cfg, stock_data_list, quiet=True, epochs=hyperSearchTrainingTimes)
-        trial_results.append((r['best_val_f1'], r, cfg))
-        print(f"[trial {idx+1:2d}/{len(trial_configs)}] valF1={r['best_val_f1']:.4f}(第{r['best_epoch']}轮) | test[Acc={r['accuracy']:.4f} P={r['precision']:.4f} R={r['recall']:.4f} F1={r['f1']:.4f}] 耗时={r['elapsed']:.0f}s  {cfg}")
-    #按验证F1排序选最优（不看testF1，避免用测试集选模型造成评估泄露）
-    trial_results.sort(key=lambda t: t[0], reverse=True)
-    print('------ 搜索结果Top5（按验证F1排序） ------')
-    for vf1, r, cfg in trial_results[:5]:
-        print(f"valF1={vf1:.4f} testF1={r['f1']:.4f}  {cfg}")
-    best_cfg = trial_results[0][2]
-    print(f'最佳配置: {best_cfg}')
-    print('提示：将最佳配置手动填回参数区并关闭ifOpenHyperSearch，即可单次训练复现（种子固定，结果与搜索时一致，可看逐轮日志与训练曲线）')
-    result = trial_results[0][1]  #直接使用搜索中最佳组的结果，不再重复精训
-else:
-    #单次训练模式：使用参数区的全局配置（与原有行为一致）
-    base_cfg = {
-        'ifOpenNormalize': ifOpenNormalize,
-        'ifOpenClassWeight': ifOpenClassWeight,
-        'ifOpenBatchNorm': ifOpenBatchNorm,
-        'residualHistoryN': residualHistoryN,
-        'edgeWindowK': edgeWindowK,
-        'edgeStride': edgeStride,
-        'dropoutRate': dropoutRate,
-        'ifOpenEdgeDropout': ifOpenEdgeDropout,
-        'edgeDropoutRate': edgeDropoutRate,
-        'ifOpenFocalLoss': ifOpenFocalLoss,
-        'focalLossGamma': focalLossGamma,
-        'earlyStopPatience': earlyStopPatience,
-    }
-    result = run_training(base_cfg, stock_data_list, quiet=False)
+    # 预处理结果检查：无可用数据时终止程序
+    if len(stock_data_list) == 0:
+        print('错误：没有成功预处理任何股票，程序终止')
+        bs.logout()
+        sys.exit(1)
 
-# 训练过程参数变化可视化
-#plot_metrics(result['precisions'], result['recalls'], result['f1s'], result['losses'])
+    #主流程：超参数搜索模式 / 单次训练模式
+    if ifOpenHyperSearch:
+        # 搜索模式下屏蔽sklearn的UndefinedMetricWarning（某类无预测样本时的警告），避免刷屏干扰每组摘要行；单次训练模式不屏蔽
+        warnings.filterwarnings('ignore', category=UndefinedMetricWarning)
+        # 固定采样种子，保证搜索组合可复现（需在run_training重置种子前一次性采样完，采样与训练互不影响）
+        set_seed(2)
+        trial_configs = sample_configs(hyperSearchSpace, hyperSearchTrials)
+        print(f'========== 超参数随机搜索：共{len(trial_configs)}组，每组{hyperSearchTrainingTimes}轮 ==========')
+        trial_results = []
+        for idx, cfg in enumerate(trial_configs):
+            r = run_training(cfg, stock_data_list, quiet=True, epochs=hyperSearchTrainingTimes)
+            trial_results.append((r['best_val_f1'], r, cfg))
+            print(f"[trial {idx+1:2d}/{len(trial_configs)}] valF1={r['best_val_f1']:.4f}(第{r['best_epoch']}轮) | test[Acc={r['accuracy']:.4f} P={r['precision']:.4f} R={r['recall']:.4f} F1={r['f1']:.4f}] 耗时={r['elapsed']:.0f}s  {cfg}")
+        #按验证F1排序选最优（不看testF1，避免用测试集选模型造成评估泄露）
+        trial_results.sort(key=lambda t: t[0], reverse=True)
+        print('------ 搜索结果Top5（按验证F1排序） ------')
+        for vf1, r, cfg in trial_results[:5]:
+            print(f"valF1={vf1:.4f} testF1={r['f1']:.4f}  {cfg}")
+        best_cfg = trial_results[0][2]
+        print(f'最佳配置: {best_cfg}')
+        print('提示：将最佳配置手动填回参数区并关闭ifOpenHyperSearch，即可单次训练复现（种子固定，结果与搜索时一致，可看逐轮日志与训练曲线）')
+        result = trial_results[0][1]  #直接使用搜索中最佳组的结果，不再重复精训
+    else:
+        #单次训练模式：使用参数区的全局配置（与原有行为一致）
+        base_cfg = {
+            'ifOpenNormalize': ifOpenNormalize,
+            'ifOpenClassWeight': ifOpenClassWeight,
+            'ifOpenBatchNorm': ifOpenBatchNorm,
+            'residualHistoryN': residualHistoryN,
+            'edgeWindowK': edgeWindowK,
+            'edgeStride': edgeStride,
+            'dropoutRate': dropoutRate,
+            'ifOpenEdgeDropout': ifOpenEdgeDropout,
+            'edgeDropoutRate': edgeDropoutRate,
+            'ifOpenFocalLoss': ifOpenFocalLoss,
+            'focalLossGamma': focalLossGamma,
+            'earlyStopPatience': earlyStopPatience,
+        }
+        result = run_training(base_cfg, stock_data_list, quiet=False)
 
-print('==============================')
-print('测试集评估结果')
-print('==============================')
-print('Accuracy:  {:.2f}%'.format(result['accuracy'] * 100))
-print('Precision: {:.4f}'.format(result['precision']))
-print('Recall:    {:.4f}'.format(result['recall']))
-print('F1 (macro): {:.4f}'.format(result['f1']))
-print('------------------------------')
-print('混淆矩阵 (行=真实, 列=预测):')
-print(result['cm'])
-print('==============================')
+    # 训练过程参数变化可视化
+    #plot_metrics(result['precisions'], result['recalls'], result['f1s'], result['losses'])
 
-# 训练过程参数变化可视化（按回车后显示图表）
-#input('\n按回车键查看训练指标曲线图...')
-#plot_metrics(result['precisions'], result['recalls'], result['f1s'], result['losses'])
-bs.logout()
+    print('==============================')
+    print('测试集评估结果')
+    print('==============================')
+    print('Accuracy:  {:.2f}%'.format(result['accuracy'] * 100))
+    print('Precision: {:.4f}'.format(result['precision']))
+    print('Recall:    {:.4f}'.format(result['recall']))
+    print('F1 (macro): {:.4f}'.format(result['f1']))
+    print('------------------------------')
+    print('混淆矩阵 (行=真实, 列=预测):')
+    print(result['cm'])
+    print('==============================')
+
+    # 训练过程参数变化可视化（按回车后显示图表）
+    #input('\n按回车键查看训练指标曲线图...')
+    #plot_metrics(result['precisions'], result['recalls'], result['f1s'], result['losses'])
+    bs.logout()
