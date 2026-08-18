@@ -15,7 +15,7 @@ import numpy as np
 from datetime import datetime
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import precision_recall_fscore_support, precision_score, confusion_matrix, accuracy_score
+from sklearn.metrics import precision_recall_fscore_support, precision_score, confusion_matrix, accuracy_score, roc_curve, auc
 from sklearn.exceptions import UndefinedMetricWarning
 import Strategy_BLJJ
 from Strategy import TradeTag
@@ -50,11 +50,11 @@ getNewStockPoolByDate = datetime.fromordinal(datetime.today().toordinal() - (dat
 ifOpenMultiStock = False    # 是否启用多股票训练（True=遍历沪深300码表拼大图，False=仅用stockCode单股票训练）
 maxStockCount = 100          # 用多少只股票同时训练（仅多股票模式生效，None=不限制）
 dropoutRate = 0.1           # Dropout率
-trainingTimes = 3000        # 训练轮次
+trainingTimes = 6000        # 训练轮次
 printInterval = 30          # 训练参数打印间隔
 ifOpenNormalize = True      # 是否启用归一化（不开）
 ifOpenEarlyStop = True      # 是否启用早停（不开）
-earlyStopPatience = 800     # 连续多少轮验证F1未提升则停止
+earlyStopPatience = 500     # 连续多少轮验证F1未提升则停止
 ifOpenLRScheduler = False   # 是否启用学习率自动调整
 lrPatience = 100            # 验证F1多少轮未提升则降低学习率
 lrFactor = 0.5              # 每次降低到原来的比例
@@ -65,10 +65,13 @@ ifOpenClassWeight = False   # 是否启用类别加权损失
 ifOpenBatchNorm = False     # 是否启用BatchNorm
 ifOpenFocalLoss = False     # 是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
 focalLossGamma = 1.0        # Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
-residualHistoryN = 5        # 短残差历史窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影）
-edgeWindowK = 25            # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
-edgeStride = 5              # 入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
-ifOpenAttentionHeatmap = True  # 是否在训练结束后绘制GAT注意力热力图（需edgeWindowK>1才有意义，K=1时每节点仅1条入边注意力恒为1）
+residualHistoryN = 8        # 短残差历史窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影）
+edgeWindowK =20            # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
+edgeStride = 1              # 入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
+ifOpenAttentionHeatmap = True  # 是否在训练结束后绘制GAT层热力图（需edgeWindowK>1才有意义，K=1时每节点仅1条入边注意力恒为1）
+netMode = 'mixed'           # 网络结构模式：mixed(GCN-GAT交替，当前默认)/onlyGCN(全GCNConv)/onlyGAT(全GATConv)
+ifOpenAblation = True       # 是否启用消融实验模式（开启后遍历ablationModes各组训练并输出对比表，量化GCN/GAT对训练的影响）
+ablationModes = ['mixed', 'onlyGCN', 'onlyGAT']  # 消融实验对比的网络模式列表（mixed=当前GCN-GAT交替基准）
 ifOpenHyperSearch = False    # 是否启用超参数随机搜索（开启后搜索空间内参数的全局值失效，自动寻找最佳组合）
 hyperSearchTrials = 10      # 随机搜索采样组数
 hyperSearchTrainingTimes = 3000  #搜索阶段每组训练轮次（短轮次快速筛选，选出最佳组合后再用trainingTimes完整训练）
@@ -166,9 +169,260 @@ def plot_metrics(precisions, recalls, f1s, losses):
     plt.legend()
     plt.show()
 
-# GAT注意力热力图：滞后lag×时间，展示“预测第i天时对前K天历史的注意力分配”
+# 收敛曲线对比：将多种架构模式的val-F1和loss训练过程画在同一张图上，量化对比收敛速度、最终性能和稳定性
+def plot_convergence_curves(results, stock_code='', smooth_window=50):
+    """
+    绘制多模式收敛曲线对比图（val-F1 + loss），并输出收敛效率统计
+    :param results: [(mode_name, run_training_result_dict), ...] 消融实验结果列表
+    :param stock_code: 股票代码，用于标题和文件名
+    :param smooth_window: 滑动平均窗口大小（越大越平滑，默认50）
+    """
+    def smooth(data, window):
+        """滑动平均平滑：用cumsum实现高效O(n)计算"""
+        if len(data) < window:
+            return data
+        arr = np.array(data, dtype=np.float64)
+        cumsum = np.cumsum(arr)
+        cumsum[window:] = cumsum[window:] - cumsum[:-window]
+        smoothed = cumsum[window - 1:] / window
+        # 前window-1个点用累积平均（避免空白）
+        head = cumsum[:window - 1] / np.arange(1, window)
+        return np.concatenate([head, smoothed])
+
+    colors = {'mixed': '#2196F3', 'onlyGCN': '#FF9800', 'onlyGAT': '#4CAF50'}
+    markers = {'mixed': 'o', 'onlyGCN': 's', 'onlyGAT': '^'}
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 5))
+
+    # 计算收敛目标阈值（所有模式最佳val-F1最小值的90%，确保所有模式都能达到）
+    min_best_f1 = min(r['best_val_f1'] for _, r in results)
+    target_f1 = round(min_best_f1 * 0.9, 3)
+
+    print(f'\n{"="*60}')
+    print(f'收敛效率对比 (target val-F1 = {target_f1})')
+    print(f'{"="*60}')
+    print(f'{"Mode":<10}{"Best val-F1":>12}{"Best Epoch":>11}{"Epochs to Target":>17}{"Elapsed(s)":>11}{"Time to Target(s)":>18}')
+    print('-' * 60)
+
+    for mode, r in results:
+        f1s = r['f1s']
+        losses = r['losses']
+        epochs = np.arange(1, len(f1s) + 1)
+        color = colors.get(mode, 'gray')
+        marker = markers.get(mode, 'o')
+
+        # 平滑处理
+        f1s_smooth = smooth(f1s, smooth_window)
+        losses_smooth = smooth(losses, smooth_window)
+
+        # 对loss使用更大的平滑窗口，进一步抑制尖峰和噪声
+        loss_smooth_window = max(smooth_window * 2, 50)
+        losses_smooth_large = smooth(losses, loss_smooth_window)
+
+        # 绘制平滑曲线（主线，粗线）
+        ax1.plot(epochs, f1s_smooth, color=color, linewidth=2,
+                 label=f'{mode} (best={r["best_val_f1"]:.4f})')
+        ax2.plot(epochs, losses_smooth_large, color=color, linewidth=2,
+                 label=f'{mode}')
+
+        # 绘制原始数据（淡色背景线，展示真实波动范围）
+        ax1.plot(epochs, f1s, color=color, linewidth=0.3, alpha=0.2)
+        ax2.plot(epochs, losses, color=color, linewidth=0.3, alpha=0.2)
+
+        # 标注最佳F1点
+        best_epoch = r['best_epoch']
+        best_f1 = r['best_val_f1']
+        ax1.plot(best_epoch, best_f1, '*', color=color, markersize=15, zorder=5)
+
+        # 计算达到目标阈值的轮次和时间（基于平滑后的曲线判断，更稳定）
+        avg_epoch_time = r['elapsed'] / len(f1s) if len(f1s) > 0 else 0
+        epochs_to_target = next((i + 1 for i, f in enumerate(f1s_smooth) if f >= target_f1), None)
+        time_to_target = f'{epochs_to_target * avg_epoch_time:.1f}' if epochs_to_target else 'N/A'
+        target_label = str(epochs_to_target) if epochs_to_target else 'N/A'
+
+        print(f'{mode:<10}{best_f1:>12.4f}{best_epoch:>11d}{target_label:>17}{r["elapsed"]:>11.0f}{time_to_target:>18}')
+
+    # 目标阈值横线
+    ax1.axhline(target_f1, color='red', linestyle='--', linewidth=1, alpha=0.5, label=f'target={target_f1}')
+
+    # F1子图
+    ax1.set_xlabel('Epoch', fontsize=11)
+    ax1.set_ylabel('Validation F1 (macro)', fontsize=11)
+    ax1.set_title(f'{stock_code} Val-F1 Convergence', fontsize=12)
+    ax1.legend(fontsize=9)
+    ax1.grid(True, alpha=0.3)
+
+    # Loss子图
+    ax2.set_xlabel('Epoch', fontsize=11)
+    ax2.set_ylabel('Training Loss', fontsize=11)
+    ax2.set_title(f'{stock_code} Loss Convergence', fontsize=12)
+    ax2.legend(fontsize=9)
+    ax2.grid(True, alpha=0.3)
+
+    # 对Loss图添加局部放大子图（显示前early_epochs轮，捕捉初始快速下降）
+    early_epochs = 300
+    inset_ax = ax2.inset_axes([0.45, 0.45, 0.5, 0.45])
+    for mode, r in results:
+        color = colors.get(mode, 'gray')
+        loss_smooth_window = max(smooth_window * 2, 50)
+        losses_smooth_large = smooth(r['losses'], loss_smooth_window)
+        epochs_full = np.arange(1, len(r['losses']) + 1)
+        end_idx = min(early_epochs, len(r['losses']))
+        inset_ax.plot(epochs_full[:end_idx], losses_smooth_large[:end_idx],
+                      color=color, linewidth=1.5)
+        inset_ax.plot(epochs_full[:end_idx], r['losses'][:end_idx],
+                      color=color, linewidth=0.2, alpha=0.3)
+    inset_ax.set_xlim(0, early_epochs)
+    inset_ax.set_title('Early Phase (0-300 epochs)', fontsize=9)
+    inset_ax.set_xlabel('Epoch', fontsize=8)
+    inset_ax.set_ylabel('Loss', fontsize=8)
+    inset_ax.tick_params(labelsize=7)
+    inset_ax.grid(True, alpha=0.3)
+
+    # 主Loss图y轴截断，隐藏初始巨大尖峰，突出后期差异
+    ax2.set_ylim(top=5)
+
+    plt.tight_layout()
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    fname = f'{ts}_convergence_comparison_{stock_code}.png'
+    fig.savefig(fname, dpi=150)
+    print(f'\nConvergence plot saved: {fname}')
+    print(f'{"="*60}\n')
+    plt.show()
+
+# ROC曲线对比：多模式在同一张图上展示ROC曲线
+def plot_roc_curves(models_data, stock_code=''):
+    """
+    绘制多模式ROC曲线对比图
+    :param models_data: [(mode, model, data, test_mask), ...] 每个模式的模型、图数据和测试集mask
+    :param stock_code: 股票代码，用于标题和文件名
+    """
+    colors = {'mixed': '#2196F3', 'onlyGCN': '#FF9800', 'onlyGAT': '#4CAF50'}
+    mode_display = {'mixed': 'GCN-GAT', 'onlyGCN': 'GCN', 'onlyGAT': 'GAT'}
+    # 1行2列：ROC Class 0, ROC Class 1
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    print(f'\n{"="*50}')
+    print(f'ROC-AUC Comparison')
+    print(f'{"="*50}')
+    print(f'{"Mode":<12}{"AUC Class 0":>12}{"AUC Class 1":>12}')
+    print('-' * 50)
+
+    for mode, model, data, test_mask in models_data:
+        color = colors.get(mode, 'gray')
+        label = mode_display.get(mode, mode)
+        model.eval()
+        with torch.no_grad():
+            logits = model(data.x, data.edge_index)
+            probs = torch.exp(logits).cpu().numpy()  # log_softmax → 概率
+        y_true = data.y.cpu().numpy()
+        test_true = y_true[test_mask]
+        test_probs = probs[test_mask]
+
+        aucs = []
+        for cls in [0, 1]:
+            y_bin = (test_true == cls).astype(int)
+            fpr, tpr, _ = roc_curve(y_bin, test_probs[:, cls])
+            roc_auc = auc(fpr, tpr)
+            aucs.append(roc_auc)
+            axes[cls].plot(fpr, tpr, color=color, linewidth=2,
+                          label=f'{label} (AUC={roc_auc:.4f})')
+
+        print(f'{label:<12}{aucs[0]:>12.4f}{aucs[1]:>12.4f}')
+
+    # ROC子图统一设置
+    for cls in [0, 1]:
+        axes[cls].plot([0, 1], [0, 1], 'k--', alpha=0.3, linewidth=1)
+        axes[cls].set_xlabel('False Positive Rate', fontsize=11)
+        axes[cls].set_ylabel('True Positive Rate', fontsize=11)
+        axes[cls].set_title(f'ROC Curve - Class {cls}', fontsize=12)
+        axes[cls].legend(fontsize=9, loc='lower right')
+        axes[cls].grid(True, alpha=0.3)
+        axes[cls].set_xlim([0, 1])
+        axes[cls].set_ylim([0, 1.05])
+
+    plt.tight_layout()
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    fname = f'{ts}_roc_comparison_{stock_code}.png'
+    fig.savefig(fname, dpi=150)
+    print(f'\nROC plot saved: {fname}')
+    print(f'{"="*50}\n')
+    plt.show()
+
+# 预测置信度分布：对比各模式的预测置信度分布，区分正确预测和错误预测
+def plot_confidence_distribution(models_data, stock_code=''):
+    """
+    绘制多模式预测置信度分布图（正确预测 vs 错误预测）
+    :param models_data: [(mode, model, data, test_mask), ...] 每个模式的模型、图数据和测试集mask
+    :param stock_code: 股票代码，用于标题和文件名
+    """
+    colors = {'mixed': '#2196F3', 'onlyGCN': '#FF9800', 'onlyGAT': '#4CAF50'}
+    mode_display = {'mixed': 'GCN-GAT', 'onlyGCN': 'GCN', 'onlyGAT': 'GAT'}
+    fig, axes = plt.subplots(1, len(models_data), figsize=(6 * len(models_data), 4.5),
+                             sharex=True, sharey=True)
+    if len(models_data) == 1:
+        axes = [axes]
+
+    bins = np.linspace(0.5, 1.0, 26)  # 二分类softmax最大概率∈[0.5, 1.0]
+
+    print(f'\n{"="*50}')
+    print(f'Prediction Confidence Distribution')
+    print(f'{"="*50}')
+    print(f'{"Mode":<10}{"Correct Mean":>13}{"Wrong Mean":>11}{"Correct>0.8":>12}')
+    print('-' * 50)
+
+    for ax, (mode, model, data, test_mask) in zip(axes, models_data):
+        color = colors.get(mode, 'gray')
+        model.eval()
+        with torch.no_grad():
+            logits = model(data.x, data.edge_index)
+            probs = torch.exp(logits).cpu().numpy()
+        y_true = data.y.cpu().numpy()
+        y_pred = np.argmax(probs, axis=1)
+        test_true = y_true[test_mask]
+        test_pred = y_pred[test_mask]
+        test_conf = np.max(probs[test_mask], axis=1)  # 每个样本的预测置信度
+
+        correct_mask = test_pred == test_true
+        wrong_mask = ~correct_mask
+        conf_correct = test_conf[correct_mask]
+        conf_wrong = test_conf[wrong_mask]
+
+        # 正确预测置信度分布（绿色填充）
+        if len(conf_correct) > 0:
+            ax.hist(conf_correct, bins=bins, alpha=0.6, color='green',
+                    label=f'Correct (mean={conf_correct.mean():.3f})',
+                    edgecolor='white')
+        # 错误预测置信度分布（红色填充）
+        if len(conf_wrong) > 0:
+            ax.hist(conf_wrong, bins=bins, alpha=0.6, color='red',
+                    label=f'Wrong (mean={conf_wrong.mean():.3f})',
+                    edgecolor='white')
+
+        ax.set_xlabel('Prediction Confidence', fontsize=11)
+        ax.set_ylabel('Count', fontsize=11)
+        ax.set_title(f'{mode_display.get(mode, mode)}', fontsize=12)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        # 统计信息
+        correct_mean = conf_correct.mean() if len(conf_correct) > 0 else 0
+        wrong_mean = conf_wrong.mean() if len(conf_wrong) > 0 else 0
+        high_conf_correct = np.sum(conf_correct > 0.8)
+        label = mode_display.get(mode, mode)
+        print(f'{label:<10}{correct_mean:>13.4f}{wrong_mean:>11.4f}{high_conf_correct:>12d}')
+
+    plt.tight_layout()
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    fname = f'{ts}_confidence_distribution_{stock_code}.png'
+    fig.savefig(fname, dpi=150)
+    print(f'\nConfidence plot saved: {fname}')
+    print(f'{"="*50}\n')
+    plt.show()
+
+# GAT层热力图：滞后lag×时间，展示"预测第i天时对前K天历史的注意力分配"
 # 因add_self_loops=False，每节点入边注意力经softmax后和为1，各列颜色分布可直接横向对比
-def plot_attention_heatmaps(model, data, priceDic, cfg, train_mask, val_mask, stock_code=''):
+def plot_attention_heatmaps(model, data, priceDic, cfg, train_mask, val_mask, stock_code='', mode=''):
     """
     绘制两张图：1) 每个GAT层一张“滞后×时间”热力图；2) 收盘价/标签与5层平均注意力的对齐视图
     :param model: 训练好的模型（已恢复最佳权重）
@@ -177,30 +431,76 @@ def plot_attention_heatmaps(model, data, priceDic, cfg, train_mask, val_mask, st
     :param cfg: 本次训练使用的超参数字典（取edgeWindowK）
     :param train_mask/val_mask: 该股票的划分mask，用于画 train/val/test 分界线
     """
-    plt.rcParams['font.sans-serif'] = ['SimHei']    # 中文标题支持
-    plt.rcParams['axes.unicode_minus'] = False
+    # plt.rcParams['font.sans-serif'] = ['SimHei']  # no longer needed for English
+    # plt.rcParams['axes.unicode_minus'] = False
     K = cfg['edgeWindowK']
     N = data.x.shape[0]
-    layer_names = ['conv2', 'conv4', 'conv6', 'conv8', 'conv10']
-    # 前向一次收集5个GAT层的注意力权重
+    # 所有层名（conv1~conv10）：GAT层用注意力权重，GCN层用伪注意力（特征相似度），全部显示
+    layer_names = [f'conv{i+1}' for i in range(10)]
+    # 用hook获取每层实际输入特征（经残差/dropout等处理后的真实输入，比手动逐层前向更准确）
+    layer_inputs = {}
+    def _pre_hook(name):
+        def hook(module, inp):
+            layer_inputs[name] = inp[0].clone()  # inp[0]=x（GCNConv/GATConv的输入）
+        return hook
+    handles = [getattr(model, f'conv{i+1}').register_forward_pre_hook(_pre_hook(f'conv{i+1}')) for i in range(10)]
+    # 前向一次收集GAT层注意力权重 + 每层输入特征
     model.eval()
     with torch.no_grad():
         _, att_list = model(data.x, data.edge_index, return_attention=True)
-    # 每层构造 [K, N] 矩阵：行=滞后lag(1~K)，列=交易日节点i，值=边(i-lag→i)的注意力α（无边处为NaN）
+    for h in handles:
+        h.remove()
+    # 边信息（用于GCN伪注意力计算）
+    edge_index_np = data.edge_index.cpu().numpy()
+    src, dst = edge_index_np[0], edge_index_np[1]
+    # 对每层构造 [K, N] 矩阵：GAT层用注意力α，GCN层用特征相似度伪注意力
     layer_mats = []
-    for ei, alpha in att_list:
-        ei = ei.cpu().numpy()
-        a = alpha.cpu().numpy().mean(axis=1)    # 多头时取均值（当前heads=1）
+    gat_idx = 0
+    for i in range(10):
+        name = f'conv{i+1}'
         mat = np.full((K, N), np.nan)
-        lag = ei[1] - ei[0]
-        valid = (lag >= 1) & (lag <= K)
-        mat[lag[valid] - 1, ei[1][valid]] = a[valid]
+        if model.is_gat[i]:
+            # GAT层：用学到的注意力权重
+            ei, alpha = att_list[gat_idx]
+            gat_idx += 1
+            ei = ei.cpu().numpy()
+            a = alpha.cpu().numpy().mean(axis=1)
+            lag = ei[1] - ei[0]
+            valid = (lag >= 1) & (lag <= K)
+            mat[lag[valid] - 1, ei[1][valid]] = a[valid]
+        else:
+            # GCN层：基于输入特征的余弦相似度计算伪注意力
+            feat = layer_inputs[name].cpu().numpy()
+            norm = np.linalg.norm(feat, axis=1, keepdims=True)
+            norm = np.maximum(norm, 1e-8)
+            feat_norm = feat / norm
+            sim = np.sum(feat_norm[src] * feat_norm[dst], axis=1)
+            for node_i in range(N):
+                mask = (dst == node_i)
+                if not np.any(mask):
+                    continue
+                neighbor_indices = np.where(mask)[0]
+                neighbor_nodes = src[neighbor_indices]
+                neighbor_sims = sim[neighbor_indices]
+                neighbor_sims = neighbor_sims - np.max(neighbor_sims)
+                exp_sims = np.exp(neighbor_sims)
+                sum_exp = np.sum(exp_sims)
+                if sum_exp < 1e-8:
+                    continue
+                normalized = exp_sims / sum_exp
+                for idx, node_j in enumerate(neighbor_nodes):
+                    lag = node_i - node_j
+                    if 1 <= lag <= K:
+                        mat[lag - 1, node_i] = normalized[idx]
         layer_mats.append(mat)
-    # 横轴日期刻度与 train/val/test 分界位置
-    dates = list(priceDic.keys())
-    tick_pos = list(range(0, N, max(1, N // 8)))
-    split_train = sum(train_mask)
-    split_val = split_train + sum(val_mask)
+    # 裁剪前K-1列：以最远lag=K的起点为准，对齐所有lag行的起点，避免左侧参差NaN
+    crop_start = K - 1
+    split_train = max(0, sum(train_mask) - crop_start)
+    # 只取训练集部分
+    layer_mats = [mat[:, crop_start:crop_start + split_train] for mat in layer_mats]
+    N_cropped = split_train
+    dates = list(priceDic.keys())[crop_start:crop_start + split_train]
+    tick_pos = list(range(0, N_cropped, max(1, N_cropped // 8)))
     lag_ticks = list(range(0, K, max(1, K // 5)))
     cmap = plt.cm.viridis.copy()
     cmap.set_bad(color='lightgray')     # 无边位置（序列开头不足K天）显示为灰色
@@ -209,33 +509,28 @@ def plot_attention_heatmaps(model, data, priceDic, cfg, train_mask, val_mask, st
     fig1, axes = plt.subplots(len(layer_mats), 1, figsize=(14, 2.2 * len(layer_mats)), sharex=True, constrained_layout=True)
     for ax, mat, name in zip(axes, layer_mats, layer_names):
         im = ax.imshow(mat, aspect='auto', origin='lower', cmap=cmap, interpolation='nearest')
-        ax.set_ylabel(f'{name}\nlag(天)')
+        ax.set_ylabel(f'{name}\nday')
         ax.set_yticks(lag_ticks)
         ax.set_yticklabels([str(l + 1) for l in lag_ticks])
-        ax.axvline(split_train, color='white', linestyle='--', linewidth=1)     # val起点
-        ax.axvline(split_val, color='red', linestyle='--', linewidth=1)         # test起点
         fig1.colorbar(im, ax=ax, pad=0.01)
     axes[-1].set_xticks(tick_pos)
     axes[-1].set_xticklabels([dates[p] for p in tick_pos], rotation=30)
-    axes[0].set_title(f'{stock_code} 各GAT层注意力热力图（纵轴=向前看第几天lag，颜色=注意力权重α，白线=val起点，红线=test起点）')
+    axes[0].set_title(f'{stock_code} Layer Heatmaps - Training Data (GAT=attention weight, GCN=pseudo-attention)')
 
-    # 图2：收盘价/标签(上) + 5层平均注意力热力图(下)，对齐时间轴观察注意力突变与行情/信号的关系
+    # 图2：收盘价/标签(上) + 多层平均热力图(下)，对齐时间轴观察注意力突变与行情/信号的关系
     mean_mat = np.nanmean(np.stack(layer_mats), axis=0)
-    closes = [float(v['close']) for v in priceDic.values()]
-    y_np = data.y.cpu().numpy()
+    closes = [float(v['close']) for v in priceDic.values()][crop_start:crop_start + split_train]
+    y_np = data.y.cpu().numpy()[crop_start:crop_start + split_train]
     fig2, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 7), sharex=True, constrained_layout=True)
-    ax1.plot(range(N), closes, color='gray', linewidth=0.8, label='close')
+    ax1.plot(range(N_cropped), closes, color='gray', linewidth=0.8, label='close')
     idx1 = np.where(y_np == 1)[0]
     idx0 = np.where(y_np == 0)[0]
-    ax1.scatter(idx1, [closes[i] for i in idx1], s=4, c='red', label='标签1')
-    ax1.scatter(idx0, [closes[i] for i in idx0], s=4, c='green', label='标签0')
-    ax1.axvline(split_train, color='blue', linestyle='--', linewidth=1)
-    ax1.axvline(split_val, color='blue', linestyle='--', linewidth=1)
-    ax1.set_ylabel('close')
-    ax1.legend(loc='upper left', fontsize=8)
-    ax1.set_title(f'{stock_code} 收盘价/标签(上) 与 5层平均注意力(下) 对齐视图（蓝线=val/test分界）')
+    ax1.scatter(idx1, [closes[i] for i in idx1], s=4, c='red', label='Label 1')
+    ax1.scatter(idx0, [closes[i] for i in idx0], s=4, c='green', label='Label 0')
+    ax1.set_ylabel('Close')
+    ax1.set_title(f'{stock_code} Close/Label (top) vs Multi-layer Avg Attention (bottom) - Training Data')
     im2 = ax2.imshow(mean_mat, aspect='auto', origin='lower', cmap=cmap, interpolation='nearest')
-    ax2.set_ylabel('lag(天)')
+    ax2.set_ylabel('day')
     ax2.set_yticks(lag_ticks)
     ax2.set_yticklabels([str(l + 1) for l in lag_ticks])
     ax2.set_xticks(tick_pos)
@@ -244,11 +539,141 @@ def plot_attention_heatmaps(model, data, priceDic, cfg, train_mask, val_mask, st
 
     # 先保存再显示（防止关图后丢失，训练成本高），文件名以时间戳为前缀，方便多次训练区分
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    f1_name = f'{ts}_注意力热力图_分层_{stock_code}.png'
-    f2_name = f'{ts}_注意力热力图_价格对齐_{stock_code}.png'
+    f1_name = f'{ts}_{mode}_GAT_heatmap_layers_{stock_code}.png'
+    f2_name = f'{ts}_{mode}_GAT_heatmap_price_aligned_{stock_code}.png'
     fig1.savefig(f1_name, dpi=150)
     fig2.savefig(f2_name, dpi=150)
-    print(f'热力图已保存: {f1_name} / {f2_name}')
+    print(f'Heatmaps saved: {f1_name} / {f2_name}')
+    plt.show()
+
+# GCN伪注意力热力图：基于特征相似度计算每个节点对邻居的关注度
+# 格式与GAT层热力图一致（lag×时间），方便直接对比GAT和GCN的邻居关注度差异
+def plot_gcn_implicit_attention_heatmap(model, data, priceDic, cfg, train_mask, val_mask, stock_code='', mode=''):
+    """
+    绘制GCN伪注意力热力图：基于输入特征的余弦相似度计算每个节点对邻居的关注度
+    :param model: 训练好的模型
+    :param data: 单只股票的图数据
+    :param priceDic: 该股票行情字典
+    :param cfg: 超参数字典（取edgeWindowK）
+    :param train_mask/val_mask: 该股票的划分mask
+    """
+    # plt.rcParams['font.sans-serif'] = ['SimHei']  # no longer needed for English
+    # plt.rcParams['axes.unicode_minus'] = False
+    K = cfg['edgeWindowK']
+    N = data.x.shape[0]
+    # 获取GCN层名（非GAT层）
+    gcn_layer_names = [f'conv{i+1}' for i, g in enumerate(model.is_gat) if not g]
+    if not gcn_layer_names:
+        print('GCN pseudo-attention heatmap skipped: no GCN layers in current network')
+        return
+    
+    # 提取GCN层对象和边信息
+    gcn_layers = [getattr(model, name) for name in gcn_layer_names]
+    edge_index = data.edge_index.cpu().numpy()
+    src, dst = edge_index[0], edge_index[1]
+    
+    # 对每个GCN层，计算伪注意力
+    layer_mats = []
+    model.eval()
+    with torch.no_grad():
+        # 逐层前向，获取每层的输入特征
+        x = data.x.clone()
+        for layer_idx, (layer, name) in enumerate(zip(gcn_layers, gcn_layer_names)):
+            # 当前层的输入特征
+            x_in = x.clone()
+            # 前向一层获取输出（用于下一层输入）
+            x = layer(x, data.edge_index)
+            # 应用ReLU和dropout（与forward一致）
+            if layer_idx < len(gcn_layers) - 1:  # 最后一层不加ReLU
+                x = F.relu(x)
+            
+            # 计算伪注意力：基于输入特征的余弦相似度
+            feat = x_in.cpu().numpy()  # [N, D]
+            # 归一化特征
+            norm = np.linalg.norm(feat, axis=1, keepdims=True)
+            norm = np.maximum(norm, 1e-8)
+            feat_norm = feat / norm  # [N, D]
+            
+            # 对所有边计算余弦相似度（向量化）
+            sim = np.sum(feat_norm[src] * feat_norm[dst], axis=1)  # [E]
+            
+            # 对每个节点，将其邻居的相似度归一化（softmax）
+            mat = np.full((K, N), np.nan)
+            for node_i in range(N):
+                # 获取指向node_i的边索引
+                mask = (dst == node_i)
+                if not np.any(mask):
+                    continue
+                neighbor_indices = np.where(mask)[0]
+                neighbor_nodes = src[neighbor_indices]
+                neighbor_sims = sim[neighbor_indices]
+                
+                # softmax归一化
+                neighbor_sims = neighbor_sims - np.max(neighbor_sims)  # 数值稳定
+                exp_sims = np.exp(neighbor_sims)
+                sum_exp = np.sum(exp_sims)
+                if sum_exp < 1e-8:
+                    continue
+                normalized = exp_sims / sum_exp
+                
+                # 按lag组织到矩阵
+                for idx, node_j in enumerate(neighbor_nodes):
+                    lag = node_i - node_j
+                    if 1 <= lag <= K:
+                        mat[lag - 1, node_i] = normalized[idx]
+            
+            layer_mats.append(mat)
+    
+    # 裁剪前K-1列并只取训练集部分
+    crop_start = K - 1
+    split_train = max(0, sum(train_mask) - crop_start)
+    layer_mats = [mat[:, crop_start:crop_start + split_train] for mat in layer_mats]
+    N_cropped = split_train
+    dates = list(priceDic.keys())[crop_start:crop_start + split_train]
+    tick_pos = list(range(0, N_cropped, max(1, N_cropped // 8)))
+    lag_ticks = list(range(0, K, max(1, K // 5)))
+    cmap = plt.cm.viridis.copy()
+    cmap.set_bad(color='lightgray')
+    
+    # 图1：每个GCN层一张 滞后×时间 热力图
+    fig1, axes = plt.subplots(len(layer_mats), 1, figsize=(14, 2.2 * len(layer_mats)), sharex=True, constrained_layout=True)
+    for ax, mat, name in zip(axes, layer_mats, gcn_layer_names):
+        im = ax.imshow(mat, aspect='auto', origin='lower', cmap=cmap, interpolation='nearest')
+        ax.set_ylabel(f'{name}\nday')
+        ax.set_yticks(lag_ticks)
+        ax.set_yticklabels([str(l + 1) for l in lag_ticks])
+        fig1.colorbar(im, ax=ax, pad=0.01)
+    axes[-1].set_xticks(tick_pos)
+    axes[-1].set_xticklabels([dates[p] for p in tick_pos], rotation=30)
+    axes[0].set_title(f'{stock_code} GCN Pseudo-attention Heatmaps - Training Data (y-axis=lookback days, color=normalized similarity weight)')
+    
+    # 图2：收盘价/标签(上) + 多层平均伪注意力热力图(下)
+    mean_mat = np.nanmean(np.stack(layer_mats), axis=0)
+    closes = [float(v['close']) for v in priceDic.values()][crop_start:crop_start + split_train]
+    y_np = data.y.cpu().numpy()[crop_start:crop_start + split_train]
+    fig2, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 7), sharex=True, constrained_layout=True)
+    ax1.plot(range(N_cropped), closes, color='gray', linewidth=0.8, label='close')
+    idx1 = np.where(y_np == 1)[0]
+    idx0 = np.where(y_np == 0)[0]
+    ax1.scatter(idx1, [closes[i] for i in idx1], s=4, c='red', label='Label 1')
+    ax1.scatter(idx0, [closes[i] for i in idx0], s=4, c='green', label='Label 0')
+    ax1.set_ylabel('Close')
+    ax1.set_title(f'{stock_code} Close/Label (top) vs GCN Avg Pseudo-attention (bottom) - Training Data')
+    im2 = ax2.imshow(mean_mat, aspect='auto', origin='lower', cmap=cmap, interpolation='nearest')
+    ax2.set_ylabel('day')
+    ax2.set_yticks(lag_ticks)
+    ax2.set_yticklabels([str(l + 1) for l in lag_ticks])
+    ax2.set_xticks(tick_pos)
+    ax2.set_xticklabels([dates[p] for p in tick_pos], rotation=30)
+    fig2.colorbar(im2, ax=[ax1, ax2], pad=0.01)
+    
+    # 保存和显示
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    f1_name = f'{ts}_{mode}_GCN_pseudo_attention_heatmap_layers_{stock_code}.png'
+    f2_name = f'{ts}_{mode}_GCN_pseudo_attention_heatmap_price_aligned_{stock_code}.png'
+    fig1.savefig(f1_name, dpi=150)
+    fig2.savefig(f2_name, dpi=150)
+    print(f'GCN pseudo-attention heatmaps saved: {f1_name} / {f2_name}')
     plt.show()
 
 # 记录和打印训练/验证进度
@@ -357,16 +782,28 @@ class Net(torch.nn.Module):
         super(Net, self).__init__()
         # add_self_loops=False：确保预测第N天时只使用前N-1天数据，节点i只聚合邻居i-1的特征
         # 10层网络：5个Block，每2层一个Block，维度平滑过渡 7→32→32→64→64→128→128→128→128→64→2
-        self.conv1 = GCNConv(7, 32, add_self_loops=False)
-        self.conv2 = GATConv(32, 32, add_self_loops=False)
-        self.conv3 = GCNConv(32, 64, add_self_loops=False)
-        self.conv4 = GATConv(64, 64, add_self_loops=False)
-        self.conv5 = GCNConv(64, 128, add_self_loops=False)
-        self.conv6 = GATConv(128, 128, add_self_loops=False)
-        self.conv7 = GCNConv(128, 128, add_self_loops=False)
-        self.conv8 = GATConv(128, 128, add_self_loops=False)
-        self.conv9 = GCNConv(128, 64, add_self_loops=False)
-        self.conv10 = GATConv(64, 2, add_self_loops=False)
+        # 网络结构模式：mixed(GCN-GAT交替)/onlyGCN(全GCN)/onlyGAT(全GAT)，消融实验用
+        self.netMode = cfg.get('netMode', 'mixed')
+        # 10层维度配置：(in_dim, out_dim)，三种模式维度完全一致，仅层类型不同
+        dims = [(7, 32), (32, 32), (32, 64), (64, 64), (64, 128),
+                (128, 128), (128, 128), (128, 128), (128, 64), (64, 2)]
+        # 记录每层是否为GAT（用于注意力收集：仅GAT层可返回attention权重）
+        self.is_gat = []
+        for i, (in_d, out_d) in enumerate(dims):
+            if self.netMode == 'onlyGCN':
+                layer = GCNConv(in_d, out_d, add_self_loops=False)
+                self.is_gat.append(False)
+            elif self.netMode == 'onlyGAT':
+                layer = GATConv(in_d, out_d, add_self_loops=False)
+                self.is_gat.append(True)
+            else:  # mixed: 奇数层(1,3,5,7,9)=GCN, 偶数层(2,4,6,8,10)=GAT
+                if i % 2 == 0:
+                    layer = GCNConv(in_d, out_d, add_self_loops=False)
+                    self.is_gat.append(False)
+                else:
+                    layer = GATConv(in_d, out_d, add_self_loops=False)
+                    self.is_gat.append(True)
+            setattr(self, f'conv{i+1}', layer)
         self.dropout = torch.nn.Dropout(cfg['dropoutRate'])
         self.edge_dropout_rate = cfg['edgeDropoutRate'] if cfg['ifOpenEdgeDropout'] else 0.0
         self.residualHistoryN = cfg['residualHistoryN']
@@ -389,9 +826,10 @@ class Net(torch.nn.Module):
             self.bn8 = torch.nn.BatchNorm1d(128)
             self.bn9 = torch.nn.BatchNorm1d(64)
 
-    # GAT层调用封装：att_list不为None时同时收集注意力权重(edge_index, alpha)，供热力图可视化使用
-    def _gat(self, conv, x, edge_index, att_list):
-        if att_list is not None:
+    # 卷积层统一调用封装：仅当该层为GAT且需要收集注意力时，额外返回attention权重(edge_index, alpha)
+    # is_gat标识当前层类型（onlyGCN全False/onlyGAT全True/mixed奇False偶True），保证三种模式forward路径一致
+    def _call_conv(self, conv, x, edge_index, att_list, is_gat):
+        if is_gat and att_list is not None:
             out, att = conv(x, edge_index, return_attention_weights=True)
             att_list.append(att)
             return out
@@ -414,68 +852,68 @@ class Net(torch.nn.Module):
             shifted_list.append(shifted_k)
         shifted_x = torch.cat(shifted_list, dim=1)
         res = self.proj1(shifted_x)
-        x = self.conv1(x, edge_index)
+        x = self._call_conv(self.conv1, x, edge_index, att_list, self.is_gat[0])
         if self.ifOpenBatchNorm: x = self.bn1(x)
         x = F.relu(x + res)
         x = self.dropout(x)
         skip1 = x  # conv1输出(32维)，供Block1跨层残差使用
         # conv2: 短残差(32→32直接相加) + 跨层残差(conv1输出→conv2输出, 32→32直接相加)
         res = x
-        x = self._gat(self.conv2, x, edge_index, att_list)
+        x = self._call_conv(self.conv2, x, edge_index, att_list, self.is_gat[1])
         if self.ifOpenBatchNorm: x = self.bn2(x)
         x = F.relu(x + res + skip1)
         x = self.dropout(x)
         # === Block 2: conv3 + conv4（64维平台，含跨层残差） ===
         # conv3: 短残差
         res = self.proj3(x)
-        x = self.conv3(x, edge_index)
+        x = self._call_conv(self.conv3, x, edge_index, att_list, self.is_gat[2])
         if self.ifOpenBatchNorm: x = self.bn3(x)
         x = F.relu(x + res)
         x = self.dropout(x)
         skip3 = x  # conv3输出(64维)，供Block2跨层残差使用
         # conv4: 短残差(64→64直接相加) + 跨层残差(conv3输出→conv4输出, 64→64直接相加)
         res = x
-        x = self._gat(self.conv4, x, edge_index, att_list)
+        x = self._call_conv(self.conv4, x, edge_index, att_list, self.is_gat[3])
         if self.ifOpenBatchNorm: x = self.bn4(x)
         x = F.relu(x + res + skip3)
         x = self.dropout(x)
         # === Block 3: conv5 + conv6（128维平台，含跨层残差） ===
         # conv5: 短残差
         res = self.proj5(x)
-        x = self.conv5(x, edge_index)
+        x = self._call_conv(self.conv5, x, edge_index, att_list, self.is_gat[4])
         if self.ifOpenBatchNorm: x = self.bn5(x)
         x = F.relu(x + res)
         x = self.dropout(x)
         skip5 = x  # conv5输出(128维)，供Block3跨层残差使用
         # conv6: 短残差(128→128直接相加) + 跨层残差(conv5输出→conv6输出, 128→128直接相加)
         res = x
-        x = self._gat(self.conv6, x, edge_index, att_list)
+        x = self._call_conv(self.conv6, x, edge_index, att_list, self.is_gat[5])
         if self.ifOpenBatchNorm: x = self.bn6(x)
         x = F.relu(x + res + skip5)
         x = self.dropout(x)
         # === Block 4: conv7 + conv8（128维平台，含跨层残差） ===
         # conv7: 短残差(128→128直接相加)
         res = x
-        x = self.conv7(x, edge_index)
+        x = self._call_conv(self.conv7, x, edge_index, att_list, self.is_gat[6])
         if self.ifOpenBatchNorm: x = self.bn7(x)
         x = F.relu(x + res)
         x = self.dropout(x)
         skip7 = x  # conv7输出(128维)，供Block4跨层残差使用
         # conv8: 短残差 + 跨层残差(conv7输出→conv8输出, 128→128直接相加)
         res = x
-        x = self._gat(self.conv8, x, edge_index, att_list)
+        x = self._call_conv(self.conv8, x, edge_index, att_list, self.is_gat[7])
         if self.ifOpenBatchNorm: x = self.bn8(x)
         x = F.relu(x + res + skip7)
         x = self.dropout(x)
         # === Block 5: conv9 + conv10（降维+输出） ===
         # conv9: 短残差
         res = self.proj9(x)
-        x = self.conv9(x, edge_index)
+        x = self._call_conv(self.conv9, x, edge_index, att_list, self.is_gat[8])
         if self.ifOpenBatchNorm: x = self.bn9(x)
         x = F.relu(x + res)
         x = self.dropout(x)
         # conv10: 输出层，不加残差
-        x = self._gat(self.conv10, x, edge_index, att_list)
+        x = self._call_conv(self.conv10, x, edge_index, att_list, self.is_gat[9])
         out = F.log_softmax(x, dim=1)
         if return_attention:
             return out, att_list
@@ -687,8 +1125,64 @@ if __name__ == '__main__':
         bs.logout()
         sys.exit(1)
 
-    #主流程：超参数搜索模式 / 单次训练模式
-    if ifOpenHyperSearch:
+    #主流程：消融实验模式 / 超参数搜索模式 / 单次训练模式
+    # 基础配置（各模式共用，消融实验在此基础上覆盖netMode）
+    base_cfg = {
+        'ifOpenNormalize': ifOpenNormalize,
+        'ifOpenClassWeight': ifOpenClassWeight,
+        'ifOpenBatchNorm': ifOpenBatchNorm,
+        'residualHistoryN': residualHistoryN,
+        'edgeWindowK': edgeWindowK,
+        'edgeStride': edgeStride,
+        'dropoutRate': dropoutRate,
+        'ifOpenEdgeDropout': ifOpenEdgeDropout,
+        'edgeDropoutRate': edgeDropoutRate,
+        'ifOpenFocalLoss': ifOpenFocalLoss,
+        'focalLossGamma': focalLossGamma,
+        'earlyStopPatience': earlyStopPatience,
+        'netMode': netMode,
+    }
+    if ifOpenAblation:
+        # 消融实验模式：遍历ablationModes各组训练，输出对比表+热力图，量化GCN/GAT对训练的影响
+        print(f'========== 消融实验：网络结构模式对比，共{len(ablationModes)}组 ==========')
+        ablation_results = []
+        for mode in ablationModes:
+            print(f'\n----- 消融组 [{mode}] -----')
+            cfg = {**base_cfg, 'netMode': mode}
+            r = run_training(cfg, stock_data_list, quiet=False)
+            ablation_results.append((mode, r, cfg))
+        # 对比表
+        print('\n========== 消融实验结果对比 ==========')
+        print(f'{"模式":<10}{"Acc":>9}{"Precision":>11}{"Recall":>9}{"F1":>9}{"valF1":>9}{"轮次":>7}{"耗时(s)":>10}')
+        print('-' * 75)
+        for mode, r, _ in ablation_results:
+            print(f'{mode:<10}{r["accuracy"]*100:>8.2f}%{r["precision"]:>11.4f}{r["recall"]:>9.4f}{r["f1"]:>9.4f}{r["best_val_f1"]:>9.4f}{r["best_epoch"]:>7d}{r["elapsed"]:>10.0f}')
+        print('-' * 75)
+        for mode, r, _ in ablation_results:
+            print(f'[{mode}] 混淆矩阵 (行=真实, 列=预测):\n{r["cm"]}\n')
+        # 收敛曲线对比：将三种模式的val-F1和loss训练过程画在同一张图上
+        convergence_data = [(mode, r) for mode, r, _ in ablation_results]
+        plot_convergence_curves(convergence_data, stock_code=stockCode)
+        # ROC曲线 + 置信度分布：对每种模式在测试集上绘制ROC和预测置信度分布
+        roc_models_data = []
+        for mode, r, cfg in ablation_results:
+            vis_stock = stock_data_list[0]
+            data_eval, _, _, test_mask_eval = build_graph([vis_stock], cfg)
+            roc_models_data.append((mode, r['model'], data_eval, test_mask_eval))
+        plot_roc_curves(roc_models_data, stock_code=stockCode)
+        plot_confidence_distribution(roc_models_data, stock_code=stockCode)
+        # 热力图：统一调用plot_attention_heatmaps（GAT层用注意力权重，GCN层用伪注意力，全部10层显示）
+        for mode, r, cfg in ablation_results:
+            if cfg['edgeWindowK'] <= 1:
+                print(f'[{mode}] edgeWindowK<=1，跳过热力图')
+                continue
+            vis_stock = stock_data_list[0]  # (priceDic, train_mask, val_mask, test_mask, code)
+            data_vis, _, _, _ = build_graph([vis_stock], cfg)
+            input(f'\n按回车键查看 [{mode}] 各层热力图...')
+            plot_attention_heatmaps(r['model'], data_vis, vis_stock[0], cfg, vis_stock[1], vis_stock[2], vis_stock[4], mode=mode)
+        bs.logout()
+        sys.exit(0)
+    elif ifOpenHyperSearch:
         # 搜索模式下屏蔽sklearn的UndefinedMetricWarning（某类无预测样本时的警告），避免刷屏干扰每组摘要行；单次训练模式不屏蔽
         warnings.filterwarnings('ignore', category=UndefinedMetricWarning)
         # 固定采样种子，保证搜索组合可复现（需在run_training重置种子前一次性采样完，采样与训练互不影响）
@@ -711,20 +1205,6 @@ if __name__ == '__main__':
         result = trial_results[0][1]  #直接使用搜索中最佳组的结果，不再重复精训
     else:
         #单次训练模式：使用参数区的全局配置（与原有行为一致）
-        base_cfg = {
-            'ifOpenNormalize': ifOpenNormalize,
-            'ifOpenClassWeight': ifOpenClassWeight,
-            'ifOpenBatchNorm': ifOpenBatchNorm,
-            'residualHistoryN': residualHistoryN,
-            'edgeWindowK': edgeWindowK,
-            'edgeStride': edgeStride,
-            'dropoutRate': dropoutRate,
-            'ifOpenEdgeDropout': ifOpenEdgeDropout,
-            'edgeDropoutRate': edgeDropoutRate,
-            'ifOpenFocalLoss': ifOpenFocalLoss,
-            'focalLossGamma': focalLossGamma,
-            'earlyStopPatience': earlyStopPatience,
-        }
         result = run_training(base_cfg, stock_data_list, quiet=False)
 
     # 训练过程参数变化可视化

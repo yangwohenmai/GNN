@@ -1,0 +1,110 @@
+#参数
+stockCode = '000001.SZ'
+dataDate = "20250101"       # 训练数据取值范围的截止日期
+periodRange = 1400          # 根据dataDate，向前取多少个自然日
+# 获取最新日期，取出当天所有股票作为股票池（默认取周一的股票池）
+getNewStockPoolByDate = datetime.fromordinal(datetime.today().toordinal() - (datetime.today().weekday() or 7)).strftime('%Y-%m-%d')
+ifOpenMultiStock = False    # 是否启用多股票训练（True=遍历沪深300码表拼大图，False=仅用stockCode单股票训练）
+maxStockCount = 100          # 用多少只股票同时训练（仅多股票模式生效，None=不限制）
+dropoutRate = 0.1           # Dropout率
+trainingTimes = 6000        # 训练轮次
+printInterval = 30          # 训练参数打印间隔
+ifOpenNormalize = True      # 是否启用归一化（不开）
+ifOpenEarlyStop = True      # 是否启用早停（不开）
+earlyStopPatience = 500     # 连续多少轮验证F1未提升则停止
+ifOpenLRScheduler = False   # 是否启用学习率自动调整
+lrPatience = 100            # 验证F1多少轮未提升则降低学习率
+lrFactor = 0.5              # 每次降低到原来的比例
+lrMinLr = 1e-5              # 学习率下限（降到此值后不再降低，防止lr过小模型停止学习）
+ifOpenEdgeDropout = False   # 是否启用边Dropout
+edgeDropoutRate = 0.2       # 边Dropout丢弃率
+ifOpenClassWeight = False   # 是否启用类别加权损失
+ifOpenBatchNorm = False     # 是否启用BatchNorm
+ifOpenFocalLoss = False     # 是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
+focalLossGamma = 1.0        # Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
+residualHistoryN = 8        # 短残差历史窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影）
+edgeWindowK =20            # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
+edgeStride = 1              # 入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
+ifOpenAttentionHeatmap = True  # 是否在训练结束后绘制GAT层热力图（需edgeWindowK>1才有意义，K=1时每节点仅1条入边注意力恒为1）
+netMode = 'mixed'           # 网络结构模式：mixed(GCN-GAT交替，当前默认)/onlyGCN(全GCNConv)/onlyGAT(全GATConv)
+ifOpenAblation = True       # 是否启用消融实验模式（开启后遍历ablationModes各组训练并输出对比表，量化GCN/GAT对训练的影响）
+ablationModes = ['mixed', 'onlyGCN', 'onlyGAT']  # 消融实验对比的网络模式列表（mixed=当前GCN-GAT交替基准）
+ifOpenHyperSearch = False    # 是否启用超参数随机搜索（开启后搜索空间内参数的全局值失效，自动寻找最佳组合）
+hyperSearchTrials = 10      # 随机搜索采样组数
+hyperSearchTrainingTimes = 3000  #搜索阶段每组训练轮次（短轮次快速筛选，选出最佳组合后再用trainingTimes完整训练）
+hyperSearchSpace = {        # 搜索空间：参数名→候选值列表（可自行增删候选值）
+    'ifOpenNormalize':   [True],            #[True, False],
+    'ifOpenClassWeight': [False],           #[True, False],
+    'ifOpenBatchNorm':   [False],           #[True, False],
+    'residualHistoryN':  [1, 3, 5, 8],
+    'edgeWindowK':       [1, 5, 10, 20],
+    'edgeStride':        [1, 2, 3, 5],
+    'dropoutRate':       [0.1, 0.2, 0.4],
+    'ifOpenEdgeDropout': [False],           #[True, False],
+    'edgeDropoutRate':   [0.2],             #[0.1, 0.2, 0.3],
+    'ifOpenFocalLoss':   [False],           #[True, False],
+    'focalLossGamma':    [1.0],             #[1.0, 2.0],
+    'earlyStopPatience': [200]              #[50, 100, 200]搜索阶段用小patience加速（单次训练模式用全局earlyStopPatience=800）
+}
+
+
+
+
+
+========== 消融实验结果对比 ==========
+模式              Acc  Precision   Recall       F1    valF1     轮次     耗时(s)
+---------------------------------------------------------------------------
+mixed        81.60%     0.8153   0.8145   0.8148   0.7831    597       303
+onlyGCN      69.60%     0.7005   0.6875   0.6872   0.6789   1838       533
+onlyGAT      56.80%     0.5629   0.5576   0.5529   0.5939     17       229
+---------------------------------------------------------------------------
+[mixed] 混淆矩阵 (行=真实, 列=预测):
+[[56 11]
+ [12 46]]
+
+[onlyGCN] 混淆矩阵 (行=真实, 列=预测):
+[[54 13]
+ [25 33]]
+
+[onlyGAT] 混淆矩阵 (行=真实, 列=预测):
+[[47 20]
+ [34 24]]
+
+
+============================================================
+收敛效率对比 (target val-F1 = 0.535)
+============================================================
+Mode       Best val-F1 Best Epoch Epochs to Target Elapsed(s) Time to Target(s)
+------------------------------------------------------------
+mixed           0.7831        597              371        303             102.5
+onlyGCN         0.6789       1838             1732        533             394.9
+onlyGAT         0.5939         17              N/A        229               N/A
+
+Convergence plot saved: 20260809_223916_convergence_comparison_000001.SZ.png
+============================================================
+
+
+==================================================
+ROC-AUC Comparison
+==================================================
+Mode        AUC Class 0  AUC Class 1  AUC Macro
+--------------------------------------------------
+mixed            0.8734       0.8734     0.8734
+onlyGCN          0.7319       0.7319     0.7319
+onlyGAT          0.5309       0.5309     0.5309
+
+ROC plot saved: 20260809_223954_roc_comparison_000001.SZ.png
+==================================================
+
+
+==================================================
+Prediction Confidence Distribution
+==================================================
+Mode       Correct Mean Wrong Mean Correct>0.8
+--------------------------------------------------
+mixed            0.8801     0.7927          80
+onlyGCN          0.7698     0.7329          42
+onlyGAT          0.5278     0.5289           0
+
+Confidence plot saved: 20260809_224028_confidence_distribution_000001.SZ.png
+==================================================
