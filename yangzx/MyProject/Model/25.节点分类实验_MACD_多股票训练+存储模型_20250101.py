@@ -51,7 +51,7 @@ periodRange = 1400          # 根据dataDate，向前取多少个自然日
 # 获取最新日期，取出当天所有股票作为股票池（默认取周一的股票池）
 getNewStockPoolByDate = datetime.fromordinal(datetime.today().toordinal() - (datetime.today().weekday() or 7)).strftime('%Y-%m-%d')
 ifOpenMultiStock = False    # 是否启用多股票训练（True=遍历沪深300码表拼大图，False=仅用stockCode单股票训练）
-maxStockCount = 20          # 用多少只股票同时训练（仅多股票模式生效，None=不限制）
+maxStockCount = 50          # 用多少只股票同时训练（仅多股票模式生效，None=不限制）
 dropoutRate = 0.1           # Dropout率
 trainingTimes = 20000        # 训练轮次
 printInterval = 50          # 训练参数打印间隔
@@ -98,6 +98,9 @@ modelSaveDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'saved_m
 # 中断恢复：记录当前处理的股票代码（信号处理器用）
 current_code = None
 allStockSorted = []  # 当前遍历的股票列表（信号处理器用）
+
+# 训练中断：记录当前训练上下文（信号处理器用，用于Ctrl+C时保存最佳模型）
+current_training_context = None  # {'model': model, 'early_stopper': early_stopper, 'cfg': cfg, 'dataDate': dataDate, 'stock_count': stock_count}
 
 
 # 股票预处理：每只股票独立处理（行情→BLJJ→flag→过滤→mask），收集后供run_training拼接成大图
@@ -206,6 +209,7 @@ def signal_handler(signum, frame):
     """
     程序被 Ctrl+C 或 kill 命令终止时的清理函数
     自动记录当前处理的股票代码，并建议下次 resume_from 的值
+    如果正在训练，保存最佳模型
     """
     import signal
     sig_name = signal.Signals(signum).name
@@ -221,6 +225,30 @@ def signal_handler(signum, frame):
             pass
     log_error('中断日志', msg)
     print(f'\n程序已中断，中断信息已写入 error.txt')
+    
+    # 如果正在训练，保存最佳模型
+    if current_training_context is not None:
+        ctx = current_training_context
+        early_stopper = ctx.get('early_stopper')
+        model = ctx.get('model')
+        cfg = ctx.get('cfg')
+        dataDate = ctx.get('dataDate')
+        stock_count = ctx.get('stock_count')
+        
+        if early_stopper is not None and early_stopper.best_state is not None:
+            # 早停模式：保存早停器中的最佳模型
+            print(f'\n检测到正在训练，保存最佳模型...')
+            model.load_state_dict(early_stopper.best_state)
+            mode = cfg.get('netMode', 'unknown')
+            save_trained_model(model, dataDate, mode, modelSaveDir, ctx.get('scaler'), stock_count)
+            print(f'最佳模型已保存（验证F1={early_stopper.best_f1:.4f}）')
+        elif model is not None:
+            # 非早停模式：保存当前模型
+            print(f'\n检测到正在训练，保存当前模型...')
+            mode = cfg.get('netMode', 'unknown')
+            save_trained_model(model, dataDate, mode, modelSaveDir, ctx.get('scaler'), stock_count)
+            print(f'当前模型已保存')
+    
     sys.exit(0)
 #endregion
 
@@ -786,7 +814,7 @@ def evaluate_test(model, data, test_mask):
     return {'accuracy': accuracy, 'precision': precision, 'recall': recall, 'f1': f1, 'cm': cm}
 
 #region ========== 模型保存/加载（方式三专用） ==========
-def save_trained_model(model, dataDate, mode, save_dir, scaler=None):
+def save_trained_model(model, dataDate, mode, save_dir, scaler=None, stock_count=None):
     """
     训练完成后保存模型权重和归一化参数
     :param model: 训练好的模型
@@ -794,9 +822,13 @@ def save_trained_model(model, dataDate, mode, save_dir, scaler=None):
     :param mode: 网络模式名（如 'mixed'、'onlyGAT'）
     :param save_dir: 保存目录
     :param scaler: 归一化参数（StandardScaler对象）
+    :param stock_count: 训练股票数量
     """
     os.makedirs(save_dir, exist_ok=True)
-    filename = f'{dataDate}_{mode}.pth'
+    if stock_count is not None:
+        filename = f'{dataDate}_{mode}_{stock_count}stocks.pth'
+    else:
+        filename = f'{dataDate}_{mode}.pth'
     filepath = os.path.join(save_dir, filename)
     # 保存模型权重和归一化参数
     save_dict = {
@@ -853,6 +885,18 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     best_epoch = 0
     #模型训练/验证
     train_start = time.time()   #记录训练开始时间，用于统计耗时
+    
+    # 设置训练上下文（用于Ctrl+C时保存最佳模型）
+    global current_training_context
+    current_training_context = {
+        'model': model,
+        'early_stopper': early_stopper,
+        'cfg': cfg,
+        'dataDate': dataDate,
+        'stock_count': len(stock_data_list),
+        'scaler': scaler
+    }
+    
     # 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
     model.train()
     for epoch in range(epochs):
@@ -890,6 +934,9 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
         model = early_stopper.restore_best(model)
         if not quiet:
             print(f"已恢复最佳模型权重（验证F1={early_stopper.best_f1:.4f}）")
+
+    # 清除训练上下文（训练已完成）
+    current_training_context = None
 
     #训练耗时统计
     train_elapsed = time.time() - train_start
@@ -1306,7 +1353,7 @@ def run_method_three(stock_list_multi=None, compare_modes_multi=None, ifSaveMode
             result_multi = run_training(cfg, stock_data_list_multi, quiet=False)
             comparison_results_multi.append((mode, result_multi, cfg))
             if ifSaveModel:
-                save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'))
+                save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'), len(stock_data_list_multi))
         print(f'\n========== 对比结果 (方式三-多股票拼大图) ==========')
         print(f'{"模式":<10}{"Acc":>9}{"Precision":>11}{"Recall":>9}{"F1":>9}{"valF1":>9}{"轮次":>7}{"耗时(s)":>10}')
         print('-' * 75)
@@ -1323,7 +1370,7 @@ def run_method_three(stock_list_multi=None, compare_modes_multi=None, ifSaveMode
         cfg = {**base_cfg_multi, 'netMode': mode}
         result_multi = run_training(cfg, stock_data_list_multi, quiet=False)
         if ifSaveModel:
-            save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'))
+            save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'), len(stock_data_list_multi))
         print('\n==============================')
         print(f'方式三-测试集评估结果（模式: {mode}）')
         print('==============================')
