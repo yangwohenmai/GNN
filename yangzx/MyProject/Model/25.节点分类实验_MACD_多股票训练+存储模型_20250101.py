@@ -1880,7 +1880,7 @@ if __name__ == '__main__':
 
     # ====== 方式三：多股票拼大图训练（所有股票拼成一个大图，共用一个模型） ======
     #run_method_three(compare_modes_multi=['onlyGAT'], ifSaveModel=True)  # 单模式训练，自动从沪深300取前 maxStockCount 只股票
-    #run_method_three(compare_modes_multi=['mixed', 'onlyGAT'], ifSaveModel=True)  # 对比多种网络模式，训练完保存模型
+    run_method_three(compare_modes_multi=['mixed', 'onlyGAT'], ifSaveModel=True)  # 对比多种网络模式，训练完保存模型
     #run_method_three(stock_list_multi=['000009.SZ', '000010.SZ'], compare_modes_multi=['onlyGAT'], ifSaveModel=True)  # 手动指定股票列表
 
     # ====== 方式四：加载已保存模型直接预测（不训练，用于测试已训练好的模型） ======
