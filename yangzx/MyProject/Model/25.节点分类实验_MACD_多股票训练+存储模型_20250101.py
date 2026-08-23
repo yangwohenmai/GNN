@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import precision_recall_fscore_support, precision_score, confusion_matrix, accuracy_score
 from sklearn.exceptions import UndefinedMetricWarning
+from sklearn.metrics import recall_score, f1_score
+from sklearn.utils.class_weight import compute_class_weight
 import Strategy_BLJJ
 from Strategy import TradeTag
 # sys.path.append用于向环境变量中添加路径
@@ -44,18 +46,18 @@ from Helper import LogHelper
 
 #参数
 stockCode = '000050.SZ'
-dataDate = "20250101"       # 训练数据取值范围的截止日期
+dataDate = "20260801"       # 训练数据取值范围的截止日期
 periodRange = 1400          # 根据dataDate，向前取多少个自然日
 # 获取最新日期，取出当天所有股票作为股票池（默认取周一的股票池）
 getNewStockPoolByDate = datetime.fromordinal(datetime.today().toordinal() - (datetime.today().weekday() or 7)).strftime('%Y-%m-%d')
 ifOpenMultiStock = False    # 是否启用多股票训练（True=遍历沪深300码表拼大图，False=仅用stockCode单股票训练）
-maxStockCount = 100          # 用多少只股票同时训练（仅多股票模式生效，None=不限制）
+maxStockCount = 20          # 用多少只股票同时训练（仅多股票模式生效，None=不限制）
 dropoutRate = 0.1           # Dropout率
-trainingTimes = 6000        # 训练轮次
+trainingTimes = 20000        # 训练轮次
 printInterval = 50          # 训练参数打印间隔
 ifOpenNormalize = True      # 是否启用归一化（不开）
 ifOpenEarlyStop = True      # 是否启用早停（不开）
-earlyStopPatience = 800     # 连续多少轮验证F1未提升则停止
+earlyStopPatience = 2000     # 连续多少轮验证F1未提升则停止
 ifOpenLRScheduler = False   # 是否启用学习率自动调整
 lrPatience = 100            # 验证F1多少轮未提升则降低学习率
 lrFactor = 0.5              # 每次降低到原来的比例
@@ -70,7 +72,7 @@ residualHistoryN = 5        # 短残差历史窗口大小（1=仅x[i-1]，n=前n
 edgeWindowK =21            # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
 edgeStride = 3              # 入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
 ifOpenAttentionHeatmap = True  # 是否在训练结束后绘制GAT层热力图（需edgeWindowK>1才有意义，K=1时每节点仅1条入边注意力恒为1）
-netMode = 'mixed'           # 不开消融开关时，用哪个模型进行单次训练，若开启消融，本参数失效：mixed(GCN-GAT交替，当前默认)/onlyGCN(全GCNConv)/onlyGAT(全GATConv)
+netMode = 'onlyGAT'           # 不开消融开关时，用哪个模型进行单次训练，若开启消融，本参数失效：mixed(GCN-GAT交替，当前默认)/onlyGCN(全GCNConv)/onlyGAT(全GATConv)
 ifOpenAblation = True       # 是否启用消融实验模式（开启后遍历ablationModes各组训练并输出对比表，量化GCN/GAT对训练的影响）
 ablationModes = ['mixed', 'onlyGCN', 'onlyGAT']  # 消融实验对比的网络模式列表（mixed=当前GCN-GAT交替基准）
 ifOpenHyperSearch = False    # 是否启用超参数随机搜索（开启后搜索空间内参数的全局值失效，自动寻找最佳组合）
@@ -91,6 +93,7 @@ hyperSearchSpace = {        # 搜索空间：参数名→候选值列表（可�
     'earlyStopPatience': [200]              #[50, 100, 200]搜索阶段用小patience加速（单次训练模式用全局earlyStopPatience=800）
 }
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #运行设备：有GPU用cuda，否则用cpu
+modelSaveDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'saved_models')  # 模型保存目录（方式三保存/方式四加载共用）
 
 # 中断恢复：记录当前处理的股票代码（信号处理器用）
 current_code = None
@@ -130,19 +133,21 @@ def process_single_stock(code, endDate, period=1400):
     return newStockPriceDic, train_mask, val_mask, test_mask, code
 
 # 特征标准化（仅用训练集统计量，防止测试集信息泄露）
-def normalize_features(data, train_mask):
+def normalize_features(data, train_mask, scaler=None):
     """
     对节点特征做标准化，消除量纲差异（仅 fit 训练集，防止数据泄露）
     :param data: PyG Data 对象
     :param train_mask: 训练集 mask（list[bool]）
-    :return: data（原地修改后返回）
+    :param scaler: 如果提供，则使用该scaler进行transform；否则fit一个新的scaler
+    :return: (data, scaler)（原地修改后返回data和scaler）
     """
     x_np = data.x.numpy().astype(np.float32)
-    scaler = StandardScaler()
-    scaler.fit(x_np[train_mask, :5])            # 只用训练集 fit 前5列（open/close/low/high/pctChg）
+    if scaler is None:
+        scaler = StandardScaler()
+        scaler.fit(x_np[train_mask, :5])            # 只用训练集 fit 前5列（open/close/low/high/pctChg）
     x_np[:, :5] = scaler.transform(x_np[:, :5]) # transform 全部数据
     data.x = torch.tensor(x_np, dtype=torch.float32)
-    return data
+    return data, scaler
 
 #region 固定所有随机种子
 def set_seed(seed=42):
@@ -740,10 +745,11 @@ class Net(torch.nn.Module):
         return out
 
 # 单/多股票建图：每只股票按cfg的K/stride独立建图，再拼成一张大图（跨股票无边相连，信息不跨股票流动）
-def build_graph(stock_data_list, cfg):
+def build_graph(stock_data_list, cfg, scaler=None):
     """
     单/多股票建图：每只股票独立建图后拼成大图，归一化并预转换类型，list中若只有一个股票即为单股票训练模式
-    :return: (data, train_mask, val_mask, test_mask)
+    :param scaler: 如果提供，则使用该scaler进行归一化；否则fit一个新的scaler
+    :return: (data, train_mask, val_mask, test_mask, scaler)
     """
     data_list = []
     train_mask, val_mask, test_mask = [], [], []
@@ -755,11 +761,11 @@ def build_graph(stock_data_list, cfg):
         test_mask.extend(te_mask)
     data = Batch.from_data_list(data_list)
     if cfg['ifOpenNormalize']:
-        data = normalize_features(data, train_mask)
+        data, scaler = normalize_features(data, train_mask, scaler)
     data = data.to(device)
     data.x = data.x.to(torch.float32)
     data.y = data.y.to(torch.long)
-    return data, train_mask, val_mask, test_mask
+    return data, train_mask, val_mask, test_mask, scaler
 
 # 测试集评估：在测试集上计算多项分类指标
 def evaluate_test(model, data, test_mask):
@@ -779,6 +785,30 @@ def evaluate_test(model, data, test_mask):
     cm = confusion_matrix(test_true_np, test_pred)
     return {'accuracy': accuracy, 'precision': precision, 'recall': recall, 'f1': f1, 'cm': cm}
 
+#region ========== 模型保存/加载（方式三专用） ==========
+def save_trained_model(model, dataDate, mode, save_dir, scaler=None):
+    """
+    训练完成后保存模型权重和归一化参数
+    :param model: 训练好的模型
+    :param dataDate: 数据日期（如 '20250101'）
+    :param mode: 网络模式名（如 'mixed'、'onlyGAT'）
+    :param save_dir: 保存目录
+    :param scaler: 归一化参数（StandardScaler对象）
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    filename = f'{dataDate}_{mode}.pth'
+    filepath = os.path.join(save_dir, filename)
+    # 保存模型权重和归一化参数
+    save_dict = {
+        'model_state_dict': model.state_dict(),
+        'scaler': scaler
+    }
+    torch.save(save_dict, filepath)
+    print(f'模型已保存: {filepath}')
+    if scaler is not None:
+        print(f'归一化参数已保存')
+#endregion
+
 # 按超参数配置执行一次完整流程：建图→归一化→建模→训练(早停)→测试评估
 def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     """
@@ -790,13 +820,12 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     """
     set_seed(2)  # 每组配置从相同随机状态出发，保证公平对比
     epochs = trainingTimes if epochs is None else epochs
-    data, train_mask, val_mask, test_mask = build_graph(stock_data_list, cfg)
+    data, train_mask, val_mask, test_mask, scaler = build_graph(stock_data_list, cfg)
     model = Net(cfg).to(device)
     # 定义损失函数和优化器
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=0.0005)
     # 类别加权：用训练集统计各类别权重，平衡不平衡样本
     if cfg['ifOpenClassWeight']:
-        from sklearn.utils.class_weight import compute_class_weight
         y_train = data.y.cpu().numpy()[train_mask]
         cw = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
         class_weight_tensor = torch.tensor(cw, dtype=torch.float32).to(device)
@@ -872,7 +901,8 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     return {'best_val_f1': best_f1, 'accuracy': metrics['accuracy'], 'precision': metrics['precision'],
             'recall': metrics['recall'], 'f1': metrics['f1'], 'cm': metrics['cm'],
             'model': model, 'best_epoch': best_epoch, 'elapsed': train_elapsed,
-            'precisions': precisions, 'recalls': recalls, 'f1s': f1s, 'losses': losses}
+            'precisions': precisions, 'recalls': recalls, 'f1s': f1s, 'losses': losses,
+            'scaler': scaler}
 
 # 边参数组合约束：要求edgeStride*2 < edgeWindowK（保证窗口内至少3条入边，避免大量组合退化成单链）
 # 例外：edgeWindowK=1且edgeStride=1的单链基准组合放行
@@ -968,8 +998,8 @@ def run_single_stock_compare(stockCode, modes, dataDate=dataDate, periodRange=pe
 
     # --- 对比表 ---
     # 输出到控制台和txt文件（追加模式）
-    log_comparison_result(stockCode, compare_results)
-    result_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '对比结果.txt')
+    log_comparison_result(stockCode, compare_results, f'对比结果_{dataDate}.txt')
+    result_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'对比结果_{dataDate}.txt')
     
     print(f'\n========== 对比结果 ({stockCode}) ==========')
     print(f'{"模式":<10}{"Acc":>9}{"Precision":>11}{"Recall":>9}{"F1":>9}{"valF1":>9}{"轮次":>7}{"耗时(s)":>10}')
@@ -1067,7 +1097,7 @@ def run_all_func():
                 print(f'[{mode}] edgeWindowK<=1，跳过热力图')
                 continue
             vis_stock = stock_data_list[0]  # (priceDic, train_mask, val_mask, test_mask, code)
-            data_vis, _, _, _ = build_graph([vis_stock], cfg)
+            data_vis, _, _, _, _ = build_graph([vis_stock], cfg)
             input(f'\n按回车键查看 [{mode}] 各层热力图...')
             plot_attention_heatmaps(r['model'], data_vis, vis_stock[0], cfg, vis_stock[1], vis_stock[2], vis_stock[4], mode=mode)
         sys.exit(0)
@@ -1118,13 +1148,660 @@ def run_all_func():
             print('注意力热力图跳过：edgeWindowK<=1时每节点仅1条入边，softmax后注意力恒为1，无展示意义')
         else:
             vis_stock = stock_data_list[0]  # (priceDic, train_mask, val_mask, test_mask, code)
-            data_vis, _, _, _ = build_graph([vis_stock], used_cfg)
+            data_vis, _, _, _, _ = build_graph([vis_stock], used_cfg)
             input('\n按回车键查看GAT注意力热力图...')
             plot_attention_heatmaps(result['model'], data_vis, vis_stock[0], used_cfg, vis_stock[1], vis_stock[2], vis_stock[4])
 
     # 训练过程参数变化可视化（按回车后显示图表）
     #input('\n按回车键查看训练指标曲线图...')
     #plot_metrics(result['precisions'], result['recalls'], result['f1s'], result['losses'])
+#endregion
+
+#region ========== 方式二：单股票遍历训练（封装函数） ==========
+def run_method_two(stock_list=None, modes=None, resume_from=''):
+    """
+    方式二：单股票遍历训练，每只股票独立训练一个模型，支持对比多种网络模式
+    :param stock_list: 手动指定股票列表，如 ['000009.SZ', '000010.SZ']；None或空则自动从沪深300码表获取
+    :param modes: 网络模式列表，如 ['onlyGAT'] 单模式 或 ['mixed', 'onlyGAT'] 对比模式；必须有值
+    :param resume_from: 断点续跑，填入股票代码（如'000023.SZ'），只跑该代码及之后的股票；空则从头开始
+    """
+    if stock_list is None:
+        stock_list = []
+    if not modes:
+        print('错误：modes 必须有值，如 ["onlyGAT"] 或 ["mixed", "onlyGAT"]')
+        sys.exit(1)
+
+    lg = bs.login()
+    if stock_list:
+        allStockSorted = stock_list
+        print(f'\n========== 方式二-手动模式：共 {len(stock_list)} 只股票 ==========')
+    else:
+        stockPoolList = StockPool.GetHS300StockListBaostock()
+        allStockDict = StockPool.GetALLStockListBaostock(getNewStockPoolByDate)
+        allStockSorted = sorted(allStockDict.keys())
+        if resume_from:
+            filtered = []
+            for code in allStockSorted:
+                if code >= resume_from:
+                    filtered.append(code)
+            allStockSorted = filtered
+            print(f'\n========== 方式二-断点续跑：从 {resume_from} 开始，剩余 {len(allStockSorted)} 只 ==========')
+        print(f'\n========== 方式二-自动模式：码表 {len(stockPoolList)} 只，全量 {len(allStockDict)} 只，本次遍历 {len(allStockSorted)} 只 ==========')
+
+    failed_list = []
+    for code in allStockSorted:
+        current_code = code
+        if not stock_list and (len(stockPoolList) == 0 or code not in stockPoolList):
+            continue
+        try:
+            result = run_single_stock_compare(code, modes)
+        except Exception as e:
+            print(f'{code} 运行失败，跳过: {e}')
+            log_error(code, traceback.format_exc())
+            failed_list.append(code)
+
+    if failed_list:
+        log_error('首轮失败列表', f'共{len(failed_list)}只: {failed_list}')
+        retry_round = 1
+        sleep_seconds = 60
+        while failed_list:
+            prev_count = len(failed_list)
+            print(f'\n========== 第{retry_round}轮重试：{len(failed_list)} 只失败股票，休眠{sleep_seconds}秒后开始 ==========')
+            time.sleep(sleep_seconds)
+            retry_list = failed_list
+            failed_list = []
+            for code in retry_list:
+                current_code = code
+                try:
+                    result = run_single_stock_compare(code, modes)
+                except Exception as e:
+                    print(f'{code} 重试仍失败，跳过: {e}')
+                    log_error(code, traceback.format_exc())
+                    failed_list.append(code)
+            if failed_list:
+                log_error(f'第{retry_round}轮重试失败列表', f'共{len(failed_list)}只: {failed_list}')
+                if len(failed_list) >= prev_count:
+                    sleep_seconds *= 2
+                    print(f'本轮无改善，下次休眠时间调整为{sleep_seconds}秒')
+                else:
+                    sleep_seconds = 60
+            retry_round += 1
+    print('方式二运行完成')
+    bs.logout()
+#endregion
+
+#region ========== 方式三：多股票拼大图训练（封装函数） ==========
+def run_method_three(stock_list_multi=None, compare_modes_multi=None, ifSaveModel=False):
+    """
+    方式三：多股票拼大图训练，支持单模式或对比模式，训练完成后自动保存模型
+    :param stock_list_multi: 手动指定股票列表，如 ['000009.SZ', '000010.SZ']；None或空则自动从码表获取，最多取 maxStockCount 只
+    :param compare_modes_multi: 网络模式列表，如 ['onlyGAT'] 单模式 或 ['mixed', 'onlyGAT'] 对比模式；必须有值
+    :param ifSaveModel: 训练完成后是否保存模型，默认False
+    """
+    if stock_list_multi is None:
+        stock_list_multi = []
+    if not compare_modes_multi:
+        print('错误：compare_modes_multi 必须有值，如 ["onlyGAT"] 或 ["mixed", "onlyGAT"]')
+        sys.exit(1)
+
+    lg = bs.login()
+    if stock_list_multi:
+        allStockSorted_multi = stock_list_multi
+        print(f'\n========== 方式三-手动模式：共 {len(stock_list_multi)} 只股票 ==========')
+    else:
+        stockPoolList_multi = StockPool.GetHS300StockListBaostock()
+        allStockDict_multi = StockPool.GetALLStockListBaostock(getNewStockPoolByDate)
+        allStockSorted_multi = sorted(allStockDict_multi.keys())
+        print(f'\n========== 方式三-自动模式：码表 {len(stockPoolList_multi)} 只，全量 {len(allStockDict_multi)} 只，本次遍历 {len(allStockSorted_multi)} 只 ==========')
+
+    stock_data_list_multi = []
+    dataCount_multi = 0
+    for code in allStockSorted_multi:
+        current_code = code
+        if not stock_list_multi and (len(stockPoolList_multi) == 0 or code not in stockPoolList_multi):
+            continue
+        if maxStockCount is not None and dataCount_multi >= maxStockCount:
+            print(f'已达到最大股票数 {maxStockCount}，停止预处理')
+            break
+        try:
+            result = process_single_stock(code, dataDate, periodRange)
+            if result is not None:
+                stock_data_list_multi.append(result)
+                dataCount_multi += 1
+                print(f'{code} 预处理完成, 序号: NO.{dataCount_multi}, 节点数: {len(result[0])}')
+            else:
+                print(f'{code} 数据不足或指标出错，跳过')
+                log_error(code, f'{code} 数据不足或指标出错')
+        except Exception as e:
+            print(f'{code} 预处理失败，跳过: {e}')
+            log_error(code, traceback.format_exc())
+
+    print(f'\n共预处理 {len(stock_data_list_multi)} 只股票，总节点数 {sum(len(r[0]) for r in stock_data_list_multi)}')
+    if len(stock_data_list_multi) == 0:
+        print('错误：没有成功预处理任何股票，程序终止')
+        sys.exit(1)
+
+    base_cfg_multi = {
+        'ifOpenNormalize': ifOpenNormalize,
+        'ifOpenClassWeight': ifOpenClassWeight,
+        'ifOpenBatchNorm': ifOpenBatchNorm,
+        'residualHistoryN': residualHistoryN,
+        'edgeWindowK': edgeWindowK,
+        'edgeStride': edgeStride,
+        'dropoutRate': dropoutRate,
+        'ifOpenEdgeDropout': ifOpenEdgeDropout,
+        'edgeDropoutRate': edgeDropoutRate,
+        'ifOpenFocalLoss': ifOpenFocalLoss,
+        'focalLossGamma': focalLossGamma,
+        'earlyStopPatience': earlyStopPatience,
+    }
+
+    if len(compare_modes_multi) > 1:
+        # 对比模式：遍历多个网络结构
+        print(f'\n========== 方式三-对比模式：{len(compare_modes_multi)} 种网络结构对比 ==========')
+        comparison_results_multi = []
+        for mode in compare_modes_multi:
+            print(f'\n----- 训练模式 [{mode}] -----')
+            cfg = {**base_cfg_multi, 'netMode': mode}
+            result_multi = run_training(cfg, stock_data_list_multi, quiet=False)
+            comparison_results_multi.append((mode, result_multi, cfg))
+            if ifSaveModel:
+                save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'))
+        print(f'\n========== 对比结果 (方式三-多股票拼大图) ==========')
+        print(f'{"模式":<10}{"Acc":>9}{"Precision":>11}{"Recall":>9}{"F1":>9}{"valF1":>9}{"轮次":>7}{"耗时(s)":>10}')
+        print('-' * 75)
+        for mode, r, _ in comparison_results_multi:
+            print(f'{mode:<10}{r["accuracy"]*100:>8.2f}%{r["precision"]:>11.4f}{r["recall"]:>9.4f}{r["f1"]:>9.4f}{r["best_val_f1"]:>9.4f}{r["best_epoch"]:>7d}{r["elapsed"]:>10.0f}')
+        print('-' * 75)
+        for mode, r, _ in comparison_results_multi:
+            print(f'[{mode}] 混淆矩阵 (行=真实, 列=预测):\n{r["cm"]}\n')
+        log_comparison_result('方式三-多股票拼大图', comparison_results_multi, f'对比结果_{dataDate}.txt')
+    else:
+        # 单模式：用 compare_modes_multi[0]
+        mode = compare_modes_multi[0]
+        print(f'\n========== 方式三：开始训练（{len(stock_data_list_multi)} 只股票拼成大图，模式: {mode}） ==========')
+        cfg = {**base_cfg_multi, 'netMode': mode}
+        result_multi = run_training(cfg, stock_data_list_multi, quiet=False)
+        if ifSaveModel:
+            save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'))
+        print('\n==============================')
+        print(f'方式三-测试集评估结果（模式: {mode}）')
+        print('==============================')
+        print('Accuracy:  {:.2f}%'.format(result_multi['accuracy'] * 100))
+        print('Precision: {:.4f}'.format(result_multi['precision']))
+        print('Recall:    {:.4f}'.format(result_multi['recall']))
+        print('F1 (macro): {:.4f}'.format(result_multi['f1']))
+        print('------------------------------')
+        print('混淆矩阵 (行=真实, 列=预测):')
+        print(result_multi['cm'])
+        print('==============================')
+        # 构造对比结果列表（与对比模式格式一致）
+        single_results = [(mode, result_multi, cfg)]
+        log_comparison_result('方式三-多股票拼大图', single_results, f'对比结果_{dataDate}.txt')
+    bs.logout()
+#endregion
+
+#region ========== 方式四：加载已保存模型直接预测（封装函数） ==========
+def run_method_four(model_name, net_mode, stock_list=None):
+    """
+    方式四：加载已保存的模型直接预测，不训练
+    :param model_name: 模型名称（不含.pth后缀，如 '20250101_mixed'、'20250101_onlyGAT'）
+    :param net_mode: 该模型训练时的网络模式（必须与训练时一致：mixed/onlyGCN/onlyGAT）
+    :param stock_list: 手动指定股票列表，如 ['000009.SZ', '000010.SZ']；None或空则自动从沪深300获取，最多取 maxStockCount 只
+    """
+    if stock_list is None:
+        stock_list = []
+    if not model_name:
+        print('错误：model_name 必须有值，如 "20250101_onlyGAT"')
+        sys.exit(1)
+    if not net_mode:
+        print('错误：net_mode 必须有值，如 "onlyGAT"')
+        sys.exit(1)
+
+    filepath = os.path.join(modelSaveDir, f'{model_name}.pth')
+    if not os.path.exists(filepath):
+        print(f'\n错误：模型文件不存在 {filepath}')
+        print(f'当前可用模型：')
+        if os.path.exists(modelSaveDir):
+            for f in sorted(os.listdir(modelSaveDir)):
+                if f.endswith('.pth'):
+                    print(f'  {f.replace(".pth", "")}')
+        else:
+            print(f'  保存目录不存在: {modelSaveDir}')
+        return
+
+    print(f'\n========== 方式四：加载模型 {model_name} 直接预测 ==========')
+    lg = bs.login()
+    if stock_list:
+        allStockSorted = stock_list
+        print(f'手动模式：共 {len(stock_list)} 只股票')
+    else:
+        stockPoolList = StockPool.GetHS300StockListBaostock()
+        allStockDict = StockPool.GetALLStockListBaostock(getNewStockPoolByDate)
+        allStockSorted = sorted(allStockDict.keys())
+        print(f'自动模式：码表 {len(stockPoolList)} 只，全量 {len(allStockDict)} 只，本次遍历 {len(allStockSorted)} 只')
+
+    stock_data_list = []
+    dataCount = 0
+    for code in allStockSorted:
+        current_code = code
+        if not stock_list and (len(stockPoolList) == 0 or code not in stockPoolList):
+            continue
+        if maxStockCount is not None and dataCount >= maxStockCount:
+            print(f'已达到最大股票数 {maxStockCount}，停止预处理')
+            break
+        try:
+            result = process_single_stock(code, dataDate, periodRange)
+            if result is not None:
+                stock_data_list.append(result)
+                dataCount += 1
+                print(f'{code} 预处理完成, 序号: NO.{dataCount}, 节点数: {len(result[0])}')
+            else:
+                print(f'{code} 数据不足或指标出错，跳过')
+        except Exception as e:
+            print(f'{code} 预处理失败，跳过: {e}')
+            log_error(code, traceback.format_exc())
+
+    print(f'\n共预处理 {len(stock_data_list)} 只股票，总节点数 {sum(len(r[0]) for r in stock_data_list)}')
+    if len(stock_data_list) == 0:
+        print('错误：没有成功预处理任何股票，程序终止')
+        sys.exit(1)
+
+    cfg = {
+        'ifOpenNormalize': ifOpenNormalize,
+        'ifOpenClassWeight': ifOpenClassWeight,
+        'ifOpenBatchNorm': ifOpenBatchNorm,
+        'residualHistoryN': residualHistoryN,
+        'edgeWindowK': edgeWindowK,
+        'edgeStride': edgeStride,
+        'dropoutRate': dropoutRate,
+        'ifOpenEdgeDropout': ifOpenEdgeDropout,
+        'edgeDropoutRate': edgeDropoutRate,
+        'ifOpenFocalLoss': ifOpenFocalLoss,
+        'focalLossGamma': focalLossGamma,
+        'earlyStopPatience': earlyStopPatience,
+        'netMode': net_mode,
+    }
+    # 加载模型和归一化参数
+    checkpoint = torch.load(filepath, weights_only=True)
+    model_state_dict = checkpoint['model_state_dict']
+    scaler = checkpoint.get('scaler')
+    if scaler is not None:
+        print(f'已加载归一化参数')
+    else:
+        print(f'警告：模型未包含归一化参数')
+    
+    data, _, _, test_mask, _ = build_graph(stock_data_list, cfg, scaler)
+    model = Net(cfg).to(device)
+    model.load_state_dict(model_state_dict)
+    print(f'已加载模型: {filepath}')
+
+    metrics = evaluate_test(model, data, test_mask)
+    metrics['best_val_f1'] = 0.0
+    metrics['best_epoch'] = 0
+    metrics['elapsed'] = 0.0
+    results = [(net_mode, metrics, cfg)]
+
+    print(f'\n========== 对比结果 (方式四-加载模型: {model_name}) ==========')
+    print(f'{"模式":<10}{"Acc":>9}{"Precision":>11}{"Recall":>9}{"F1":>9}{"valF1":>9}{"轮次":>7}{"耗时(s)":>10}')
+    print('-' * 75)
+    for mode, r, _ in results:
+        print(f'{mode:<10}{r["accuracy"]*100:>8.2f}%{r["precision"]:>11.4f}{r["recall"]:>9.4f}{r["f1"]:>9.4f}{r["best_val_f1"]:>9.4f}{r["best_epoch"]:>7d}{r["elapsed"]:>10.0f}')
+    print('-' * 75)
+    for mode, r, _ in results:
+        print(f'[{mode}] 混淆矩阵 (行=真实, 列=预测):\n{r["cm"]}\n')
+    log_comparison_result(f'方式四-{model_name}', results, f'对比结果_{dataDate}.txt')
+    bs.logout()
+#endregion
+
+#region ========== 方式五：滚动预测（模拟真实交易场景） ==========
+def run_method_four_rolling(model_name, net_mode, stock_list=None, test_ratio=0.15):
+    """
+    方式五：滚动预测，模拟真实交易场景
+    对每只股票的测试集，逐天进行预测，每天只用截止到当天的数据
+    :param model_name: 模型名称（不含.pth后缀）
+    :param net_mode: 网络模式（必须与训练时一致）
+    :param stock_list: 股票列表，None或空则自动从沪深300获取
+    :param test_ratio: 测试集比例，默认0.15
+    """
+    if stock_list is None:
+        stock_list = []
+    if not model_name:
+        print('错误：model_name 必须有值')
+        sys.exit(1)
+    if not net_mode:
+        print('错误：net_mode 必须有值')
+        sys.exit(1)
+
+    filepath = os.path.join(modelSaveDir, f'{model_name}.pth')
+    if not os.path.exists(filepath):
+        print(f'\n错误：模型文件不存在 {filepath}')
+        return
+
+    print(f'\n========== 方式五-滚动预测：加载模型 {model_name} ==========')
+    lg = bs.login()
+    if stock_list:
+        allStockSorted = stock_list
+        print(f'手动模式：共 {len(stock_list)} 只股票')
+    else:
+        stockPoolList = StockPool.GetHS300StockListBaostock()
+        allStockDict = StockPool.GetALLStockListBaostock(getNewStockPoolByDate)
+        allStockSorted = sorted(allStockDict.keys())
+        print(f'自动模式：码表 {len(stockPoolList)} 只，全量 {len(allStockDict)} 只')
+
+    # 归一化处理：保持和原始训练一致，用前75%的数据计算归一化参数
+    cfg = {
+        'ifOpenNormalize': ifOpenNormalize,  # 使用和训练时相同的归一化设置
+        'ifOpenClassWeight': ifOpenClassWeight,
+        'ifOpenBatchNorm': ifOpenBatchNorm,
+        'residualHistoryN': residualHistoryN,
+        'edgeWindowK': edgeWindowK,
+        'edgeStride': edgeStride,
+        'dropoutRate': dropoutRate,
+        'ifOpenEdgeDropout': ifOpenEdgeDropout,
+        'edgeDropoutRate': edgeDropoutRate,
+        'ifOpenFocalLoss': ifOpenFocalLoss,
+        'focalLossGamma': focalLossGamma,
+        'earlyStopPatience': earlyStopPatience,
+        'netMode': net_mode,
+    }
+
+    # 加载模型和归一化参数
+    checkpoint = torch.load(filepath, weights_only=True)
+    model_state_dict = checkpoint['model_state_dict']
+    scaler = checkpoint.get('scaler')
+    if scaler is not None:
+        print(f'已加载归一化参数（训练时保存的）')
+    else:
+        print(f'警告：模型未包含归一化参数')
+    
+    model = Net(cfg).to(device)
+    model.load_state_dict(model_state_dict)
+    print(f'已加载模型: {filepath}')
+
+    all_predictions = []  # 存储所有预测结果
+    all_labels = []       # 存储所有真实标签
+    
+    for code in allStockSorted:
+        if not stock_list and (len(stockPoolList) == 0 or code not in stockPoolList):
+            continue
+        
+        try:
+            # 获取完整数据
+            result = process_single_stock(code, dataDate, periodRange)
+            if result is None:
+                print(f'{code} 数据不足，跳过')
+                continue
+            
+            priceDic, _, _, _, _ = result
+            items = list(priceDic.items())
+            total_days = len(items)
+            test_start = int(total_days * (1 - test_ratio))
+            test_days = total_days - test_start
+            
+            print(f'\n{code}: 共{total_days}天，测试集从第{test_start+1}天开始，共{test_days}天')
+            
+            # 滚动预测：从测试集第一天开始
+            for test_day_idx in range(test_days):
+                test_day = test_start + test_day_idx + 1  # 当前要预测的天数（1-based）
+                
+                # 截取数据：只用前test_day天
+                truncated_priceDic = dict(items[:test_day])
+                
+                # 构建单只股票的stock_data_list
+                # 关键：保持和原始训练相同的划分比例（75%/10%/15%）
+                # 归一化只用前75%的数据计算，保证一致性
+                split_train = int(test_day * 0.75)
+                split_val = int(test_day * 0.85)
+                
+                train_mask = [i < split_train for i in range(test_day)]      # 前75%为True
+                val_mask = [split_train <= i < split_val for i in range(test_day)]  # 75%-85%为True
+                test_mask = [i == test_day - 1 for i in range(test_day)]     # 只有最后一个节点为True
+                
+                single_stock_data = [(truncated_priceDic, train_mask, val_mask, test_mask, code)]
+                
+                # 建图（使用训练时的归一化参数）
+                data, _, _, test_mask_out, _ = build_graph(single_stock_data, cfg, scaler)
+                
+                # 将最后一个节点的特征置零（模拟真实场景：预测当天时，当天数据还未使用）
+                last_node_idx = data.x.size(0) - 1
+                data.x[last_node_idx] = 0.0
+                
+                # 预测
+                model.eval()
+                with torch.no_grad():
+                    out = model(data.x, data.edge_index)
+                    pred = torch.argmax(out[last_node_idx]).item()
+                    label = data.y[last_node_idx].item()
+                
+                all_predictions.append(pred)
+                all_labels.append(label)
+                
+                # 每10天输出一次进度
+                if (test_day_idx + 1) % 10 == 0 or test_day_idx == 0:
+                    print(f'  第{test_day}天预测: 预测={pred}, 真实={label} {"✓" if pred == label else "✗"}')
+            
+        except Exception as e:
+            print(f'{code} 处理失败: {e}')
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    bs.logout()
+    
+    # 计算整体指标
+    if len(all_predictions) == 0:
+        print('\n没有成功的预测')
+        return
+    
+    
+    
+    accuracy = accuracy_score(all_labels, all_predictions)
+    precision = precision_score(all_labels, all_predictions, average='macro', zero_division=0)
+    recall = recall_score(all_labels, all_predictions, average='macro', zero_division=0)
+    f1 = f1_score(all_labels, all_predictions, average='macro', zero_division=0)
+    cm = confusion_matrix(all_labels, all_predictions)
+    
+    print(f'\n========== 滚动预测结果 ==========')
+    print(f'总预测次数: {len(all_predictions)}')
+    print(f'Accuracy:  {accuracy*100:.2f}%')
+    print(f'Precision: {precision:.4f}')
+    print(f'Recall:    {recall:.4f}')
+    print(f'F1 (macro): {f1:.4f}')
+    print(f'\n混淆矩阵 (行=真实, 列=预测):')
+    print(cm)
+    
+    # 记录结果
+    results = [(net_mode, {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'cm': cm,
+        'best_val_f1': 0.0,
+        'best_epoch': 0,
+        'elapsed': 0.0
+    }, cfg)]
+    log_comparison_result(f'方式五-滚动预测-{model_name}', results, f'对比结果_{dataDate}.txt')
+#endregion
+
+#region ========== 方式六：多股票单日预测（每只股票只预测最后一天） ==========
+def run_method_four_multi_stock(model_name, net_mode, stock_list=None):
+    """
+    方式六：多股票单日预测
+    每只股票用前N-1天数据建图，预测最后一天（特征置零）
+    :param model_name: 模型名称（不含.pth后缀）
+    :param net_mode: 网络模式（必须与训练时一致）
+    :param stock_list: 股票列表，None或空则自动从沪深300获取
+    """
+    if stock_list is None:
+        stock_list = []
+    if not model_name:
+        print('错误：model_name 必须有值')
+        sys.exit(1)
+    if not net_mode:
+        print('错误：net_mode 必须有值')
+        sys.exit(1)
+
+    filepath = os.path.join(modelSaveDir, f'{model_name}.pth')
+    if not os.path.exists(filepath):
+        print(f'\n错误：模型文件不存在 {filepath}')
+        return
+
+    print(f'\n========== 方式六-多股票单日预测：加载模型 {model_name} ==========')
+    lg = bs.login()
+    if stock_list:
+        allStockSorted = stock_list
+        print(f'手动模式：共 {len(stock_list)} 只股票')
+    else:
+        stockPoolList = StockPool.GetHS300StockListBaostock()
+        allStockDict = StockPool.GetALLStockListBaostock(getNewStockPoolByDate)
+        allStockSorted = sorted(allStockDict.keys())
+        print(f'自动模式：码表 {len(stockPoolList)} 只，全量 {len(allStockDict)} 只')
+
+    cfg = {
+        'ifOpenNormalize': ifOpenNormalize,
+        'ifOpenClassWeight': ifOpenClassWeight,
+        'ifOpenBatchNorm': ifOpenBatchNorm,
+        'residualHistoryN': residualHistoryN,
+        'edgeWindowK': edgeWindowK,
+        'edgeStride': edgeStride,
+        'dropoutRate': dropoutRate,
+        'ifOpenEdgeDropout': ifOpenEdgeDropout,
+        'edgeDropoutRate': edgeDropoutRate,
+        'ifOpenFocalLoss': ifOpenFocalLoss,
+        'focalLossGamma': focalLossGamma,
+        'earlyStopPatience': earlyStopPatience,
+        'netMode': net_mode,
+    }
+
+    # 加载模型和归一化参数
+    checkpoint = torch.load(filepath, weights_only=True)
+    model_state_dict = checkpoint['model_state_dict']
+    scaler = checkpoint.get('scaler')
+    if scaler is not None:
+        print(f'已加载归一化参数')
+    else:
+        print(f'警告：模型未包含归一化参数')
+    
+    model = Net(cfg).to(device)
+    model.load_state_dict(model_state_dict)
+    print(f'已加载模型: {filepath}')
+
+    all_predictions = []  # 存储所有预测结果
+    all_labels = []       # 存储所有真实标签
+    all_codes = []        # 存储股票代码
+    
+    for code in allStockSorted:
+        if not stock_list and (len(stockPoolList) == 0 or code not in stockPoolList):
+            continue
+        
+        try:
+            # 获取完整数据
+            result = process_single_stock(code, dataDate, periodRange)
+            if result is None:
+                print(f'{code} 数据不足，跳过')
+                continue
+            
+            priceDic, _, _, _, _ = result
+            items = list(priceDic.items())
+            total_days = len(items)
+            
+            # 只用前N-1天数据建图
+            truncated_priceDic = dict(items[:-1])  # 去掉最后一天
+            
+            # 构建mask：前N-1天都是训练集，最后一天是测试集
+            train_mask = [True] * (total_days - 1)
+            val_mask = [False] * (total_days - 1)
+            test_mask = [False] * (total_days - 1)  # 建图时测试集为空
+            
+            single_stock_data = [(truncated_priceDic, train_mask, val_mask, test_mask, code)]
+            
+            # 建图（使用训练时的归一化参数）
+            data, _, _, _, _ = build_graph(single_stock_data, cfg, scaler)
+            
+            # 添加最后一个节点（最后一天），特征置零
+            last_day_data = items[-1][1]  # 最后一天的原始数据
+            last_features = torch.zeros(7, dtype=torch.float32)  # 特征置零
+            last_features[5] = total_days / total_days  # dayCount
+            last_features[6] = last_day_data.get('flag', 0)  # flag
+            last_label = last_day_data.get('flag', 0)  # 真实标签
+            
+            # 拼接节点特征
+            data.x = torch.cat([data.x, last_features.unsqueeze(0)], dim=0)
+            data.y = torch.cat([data.y, torch.tensor([last_label], dtype=torch.long)], dim=0)
+            
+            # 添加边：连接前一个节点到最后一个节点
+            last_node_idx = data.x.size(0) - 1
+            prev_node_idx = last_node_idx - 1
+            new_edges = torch.tensor([[prev_node_idx], [last_node_idx]], dtype=torch.long)
+            if data.edge_index.size(1) > 0:
+                data.edge_index = torch.cat([data.edge_index, new_edges], dim=1)
+            else:
+                data.edge_index = new_edges
+            
+            # 预测最后一个节点
+            model.eval()
+            with torch.no_grad():
+                out = model(data.x, data.edge_index)
+                pred = torch.argmax(out[last_node_idx]).item()
+            
+            all_predictions.append(pred)
+            all_labels.append(last_label)
+            all_codes.append(code)
+            
+            # 输出进度
+            if len(all_predictions) % 10 == 0 or len(all_predictions) == 1:
+                print(f'  {code}: 预测={pred}, 真实={last_label} {"✓" if pred == last_label else "✗"}')
+            
+        except Exception as e:
+            print(f'{code} 处理失败: {e}')
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    bs.logout()
+    
+    # 计算整体指标
+    if len(all_predictions) == 0:
+        print('\n没有成功的预测')
+        return
+    
+    accuracy = accuracy_score(all_labels, all_predictions)
+    precision = precision_score(all_labels, all_predictions, average='macro', zero_division=0)
+    recall = recall_score(all_labels, all_predictions, average='macro', zero_division=0)
+    f1 = f1_score(all_labels, all_predictions, average='macro', zero_division=0)
+    cm = confusion_matrix(all_labels, all_predictions)
+    
+    print(f'\n========== 多股票单日预测结果 ==========')
+    print(f'股票数量: {len(all_predictions)}')
+    print(f'Accuracy:  {accuracy*100:.2f}%')
+    print(f'Precision: {precision:.4f}')
+    print(f'Recall:    {recall:.4f}')
+    print(f'F1 (macro): {f1:.4f}')
+    print(f'\n混淆矩阵 (行=真实, 列=预测):')
+    print(cm)
+    
+    # 输出每只股票的预测结果
+    print(f'\n详细结果:')
+    print(f'{"股票代码":<12}{"预测":>6}{"真实":>6}{"结果":>6}')
+    print('-' * 35)
+    for code, pred, label in zip(all_codes, all_predictions, all_labels):
+        result_str = '✓' if pred == label else '✗'
+        print(f'{code:<12}{pred:>6}{label:>6}{result_str:>6}')
+    
+    # 记录结果
+    results = [(net_mode, {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'cm': cm,
+        'best_val_f1': 0.0,
+        'best_epoch': 0,
+        'elapsed': 0.0
+    }, cfg)]
+    log_comparison_result(f'方式六-多股票单日预测-{model_name}', results, f'对比结果_{dataDate}.txt')
 #endregion
 
 if __name__ == '__main__':
@@ -1148,200 +1825,30 @@ if __name__ == '__main__':
     #endregion
     
 
-    # ====== 方式二：自动遍历股票池（码表可替换，按代码从小到大排序） ======
-    # 手动指定股票列表，如 ['000009.SZ', '000010.SZ']；留空则自动从码表获取
-    #stock_list = ['000009.SZ','000010.SZ','000011.SZ','000012.SZ','000013.SZ',
-    #              '000014.SZ','000015.SZ','000016.SZ','000017.SZ']  
-    #stock_list = [] #没有数据，走遍历股票池
-    #resume_from = '300628.SZ'  # 断点续跑：填入股票代码（如'000023.SZ'），只跑该代码及之后的股票；留空则从头开始（仅自动模式生效）
-#
-    #if stock_list:
-    #    # 手动模式：直接用 stock_list
-    #    allStockSorted = stock_list
-    #    print(f'\n========== 手动模式：共 {len(stock_list)} 只股票 ==========')
-    #else:
-    #    # 自动模式：从码表获取
-    #    lg = bs.login()
-    #    try:
-    #        stockPoolList = StockPool.GetHS300StockListBaostock()  # 码表：沪深300（可换成中证500等）
-    #        allStockDict = StockPool.GetALLStockListBaostock(getNewStockPoolByDate)
-    #    finally:
-    #        bs.logout()  # 即使获取码表异常也保证登出，防止会话泄漏
-    #    allStockSorted = sorted(allStockDict.keys())
-    #    if resume_from:
-    #        filtered = []
-    #        for code in allStockSorted:
-    #            if code >= resume_from:
-    #                filtered.append(code)
-    #        allStockSorted = filtered
-    #        print(f'\n========== 断点续跑：从 {resume_from} 开始，剩余 {len(allStockSorted)} 只 ==========')
-    #    print(f'\n========== 自动模式：码表 {len(stockPoolList)} 只，全量 {len(allStockDict)} 只，本次遍历 {len(allStockSorted)} 只 ==========')
-#
-    #failed_list = []
-    #for code in allStockSorted:
-    #    current_code = code
-    #    # 自动模式下需要过滤码表
-    #    if not stock_list and (len(stockPoolList) == 0 or code not in stockPoolList):
-    #        continue
-    #    try:
-    #        result = run_single_stock_compare(code, ['mixed', 'onlyGAT'])
-    #    except Exception as e:
-    #        print(f'{code} 运行失败，跳过: {e}')
-    #        log_error(code, traceback.format_exc())
-    #        failed_list.append(code)
-    #if failed_list:
-    #    log_error('首轮失败列表', f'共{len(failed_list)}只: {failed_list}')
-    ## 重试失败列表，直到全部成功（无改善时休眠时间翻倍）
-    #retry_round = 1
-    #sleep_seconds = 60  # 初始休眠1分钟
-    #while failed_list:
-    #    prev_count = len(failed_list)
-    #    print(f'\n========== 第{retry_round}轮重试：{len(failed_list)} 只失败股票，休眠{sleep_seconds}秒后开始 ==========')
-    #    time.sleep(sleep_seconds)
-    #    retry_list = failed_list
-    #    failed_list = []
-    #    for code in retry_list:
-    #        current_code = code
-    #        try:
-    #            result = run_single_stock_compare(code, ['mixed', 'onlyGAT'])
-    #        except Exception as e:
-    #            print(f'{code} 重试仍失败，跳过: {e}')
-    #            log_error(code, traceback.format_exc())
-    #            failed_list.append(code)
-    #    if failed_list:
-    #        log_error(f'第{retry_round}轮重试失败列表', f'共{len(failed_list)}只: {failed_list}')
-    #        if len(failed_list) >= prev_count:
-    #            sleep_seconds *= 2  # 无改善，休眠时间翻倍
-    #            print(f'本轮无改善，下次休眠时间调整为{sleep_seconds}秒')
-    #        else:
-    #            sleep_seconds = 60  # 有改善，重置为1分钟
-    #    retry_round += 1
-    #print('所有股票均运行成功')
-    #bs.logout()
+    # ====== 方式二：单股票遍历训练（每只股票独立训练一个模型） ======
+    #run_method_two(modes=['onlyGAT'])  # 单模式训练，自动从沪深300遍历所有股票
+    #run_method_two(modes=['mixed', 'onlyGAT'])  # 对比多种网络模式，自动从沪深300遍历
+    #run_method_two(stock_list=['000009.SZ', '000010.SZ'], modes=['onlyGAT'])  # 手动指定股票列表，只训练指定的股票
+    #run_method_two(modes=['onlyGAT'], resume_from='000023.SZ')  # 断点续跑，遍历沪深300股票池，从指定股票代码开始继续训练
 
-    # ====== 方式三：多股票拼大图训练（多只股票合并成一张大图，一个模型同时训练） ======
-    #region 方式三：多股票拼大图训练
-    # 手动指定股票列表；留空则自动从码表获取
-    # 有值：只用这些股票拼大图训练（如测试、调试、自定义股票池）
-    # 留空：自动从沪深300码表获取，最多取 maxStockCount_multi 只
-    stock_list_multi = []  # 如 ['000009.SZ', '000010.SZ']；留空则自动遍历股票池
-    maxStockCount_multi = 100  # 最多用多少只股票训练（None=不限制）
+    # ====== 方式三：多股票拼大图训练（所有股票拼成一个大图，共用一个模型） ======
+    #run_method_three(compare_modes_multi=['onlyGAT'], ifSaveModel=True)  # 单模式训练，自动从沪深300取前 maxStockCount 只股票
+    run_method_three(compare_modes_multi=['mixed', 'onlyGAT'], ifSaveModel=True)  # 对比多种网络模式，训练完保存模型
+    #run_method_three(stock_list_multi=['000009.SZ', '000010.SZ'], compare_modes_multi=['onlyGAT'], ifSaveModel=True)  # 手动指定股票列表
+
+    # ====== 方式四：加载已保存模型直接预测（不训练，用于测试已训练好的模型） ======
+    #run_method_four(model_name='20250101_onlyGAT', net_mode='onlyGAT')  # 加载模型预测，自动从沪深300取前 maxStockCount 只股票
+    #run_method_four(model_name='20250101_mixed', net_mode='mixed', stock_list=['600519.SH', '601318.SH', '601398.SH'])  # 手动指定股票，用指定股票的数据做预测
+    #run_method_four(model_name='20250101_onlyGAT', net_mode='onlyGAT', stock_list=['600519.SH', '601318.SH', '601398.SH'])  # 手动指定股票，用指定股票的数据做预测
+
+    # ====== 方式五：滚动预测（模拟真实交易场景，逐天预测） ======
+    #run_method_four_rolling(model_name='20250101_onlyGAT', net_mode='onlyGAT', stock_list=['600519.SH', '601318.SH', '601398.SH'])  # 手动指定股票，滚动预测
+    #run_method_four_rolling(model_name='20250101_onlyGAT', net_mode='onlyGAT')  # 自动从沪深300取前 maxStockCount 只股票，滚动预测
+
+    # ====== 方式六：多股票单日预测（每只股票只预测最后一天，快速测试） ======
+    #run_method_four_multi_stock(model_name='20250101_onlyGAT', net_mode='onlyGAT', stock_list=['600519.SH', '601318.SH', '601398.SH'])  # 手动指定股票
+    #run_method_four_multi_stock(model_name='20250101_onlyGAT', net_mode='onlyGAT')  # 自动从沪深300取前 maxStockCount 只股票
     
-    # 对比模式：填入多个模式则对比训练，如 ['mixed', 'onlyGAT']；留空或只有一个则用 netMode 单次训练
-    compare_modes_multi = ['mixed', 'onlyGAT']  # 对比 mixed 和 onlyGAT 两种模式
 
-    if stock_list_multi:
-        # 手动模式：直接用 stock_list_multi
-        allStockSorted_multi = stock_list_multi
-        print(f'\n========== 方式三-手动模式：共 {len(stock_list_multi)} 只股票 ==========')
-    else:
-        # 自动模式：从码表获取
-        lg = bs.login()
-        try:
-            stockPoolList_multi = StockPool.GetHS300StockListBaostock()  # 码表
-            allStockDict_multi = StockPool.GetALLStockListBaostock(getNewStockPoolByDate)
-        finally:
-            pass
-            #bs.logout()
-        allStockSorted_multi = sorted(allStockDict_multi.keys())
-        print(f'\n========== 方式三-自动模式：码表 {len(stockPoolList_multi)} 只，全量 {len(allStockDict_multi)} 只，本次遍历 {len(allStockSorted_multi)} 只 ==========')
 
-    # 预处理多只股票（收集到 stock_data_list）
-    stock_data_list_multi = []
-    dataCount_multi = 0
-    for code in allStockSorted_multi:
-        current_code = code
-        # 自动模式下需要过滤码表
-        if not stock_list_multi and (len(stockPoolList_multi) == 0 or code not in stockPoolList_multi):
-            continue
-        # 检查是否达到最大数量
-        if maxStockCount_multi is not None and dataCount_multi >= maxStockCount_multi:
-            print(f'已达到最大股票数 {maxStockCount_multi}，停止预处理')
-            break
-        try:
-            result = process_single_stock(code, dataDate, periodRange)
-            if result is not None:
-                stock_data_list_multi.append(result)
-                dataCount_multi += 1
-                print(f'{code} 预处理完成, 序号: NO.{dataCount_multi}, 节点数: {len(result[0])}')
-            else:
-                print(f'{code} 数据不足或指标出错，跳过')
-                log_error(code, f'{code} 数据不足或指标出错')
-        except Exception as e:
-            print(f'{code} 预处理失败，跳过: {e}')
-            log_error(code, traceback.format_exc())
 
-    print(f'\n共预处理 {len(stock_data_list_multi)} 只股票，总节点数 {sum(len(r[0]) for r in stock_data_list_multi)}')
-
-    # 检查是否有数据
-    if len(stock_data_list_multi) == 0:
-        print('错误：没有成功预处理任何股票，程序终止')
-        sys.exit(1)
-
-    # 构建基础配置
-    base_cfg_multi = {
-        'ifOpenNormalize': ifOpenNormalize,
-        'ifOpenClassWeight': ifOpenClassWeight,
-        'ifOpenBatchNorm': ifOpenBatchNorm,
-        'residualHistoryN': residualHistoryN,
-        'edgeWindowK': edgeWindowK,
-        'edgeStride': edgeStride,
-        'dropoutRate': dropoutRate,
-        'ifOpenEdgeDropout': ifOpenEdgeDropout,
-        'edgeDropoutRate': edgeDropoutRate,
-        'ifOpenFocalLoss': ifOpenFocalLoss,
-        'focalLossGamma': focalLossGamma,
-        'earlyStopPatience': earlyStopPatience,
-        'netMode': netMode,
-    }
-
-    # 训练（多股票拼大图）：支持单模式或对比模式
-    if compare_modes_multi and len(compare_modes_multi) > 1:
-        # 对比模式：遍历多个网络结构，分别训练并对比结果
-        print(f'\n========== 方式三-对比模式：{len(compare_modes_multi)} 种网络结构对比 ==========')
-        comparison_results_multi = []
-        for mode in compare_modes_multi:
-            print(f'\n----- 训练模式 [{mode}] -----')
-            cfg = {**base_cfg_multi, 'netMode': mode}
-            result_multi = run_training(cfg, stock_data_list_multi, quiet=False)
-            comparison_results_multi.append((mode, result_multi))
-        
-        # 输出对比表（类似方式二的 log_comparison_result）
-        print('\n==============================')
-        print('方式三-多模式对比结果')
-        print('==============================')
-        print(f'{"模式":<12}{"Acc":>9}{"Precision":>11}{"Recall":>9}{"F1":>9}')
-        print('-' * 55)
-        for mode, r in comparison_results_multi:
-            print(f'{mode:<12}{r["accuracy"]*100:>8.2f}%{r["precision"]:>11.4f}{r["recall"]:>9.4f}{r["f1"]:>9.4f}')
-        print('-' * 55)
-        
-        # 输出每只股票的混淆矩阵
-        for mode, r in comparison_results_multi:
-            print(f'\n[{mode}] 混淆矩阵 (行=真实, 列=预测):')
-            print(r['cm'])
-        
-        # 记录对比结果到日志
-        summary = '\n'.join([f'{mode}: Acc={r["accuracy"]*100:.2f}%, F1={r["f1"]:.4f}' for mode, r in comparison_results_multi])
-        log_error('方式三对比结果', f'股票数: {len(stock_data_list_multi)}\n{summary}')
-    else:
-        # 单模式：只用 netMode 训练一次
-        print(f'\n========== 方式三：开始训练（{len(stock_data_list_multi)} 只股票拼成大图） ==========')
-        result_multi = run_training(base_cfg_multi, stock_data_list_multi, quiet=False)
-
-        # 输出结果
-        print('\n==============================')
-        print('方式三-测试集评估结果')
-        print('==============================')
-        print('Accuracy:  {:.2f}%'.format(result_multi['accuracy'] * 100))
-        print('Precision: {:.4f}'.format(result_multi['precision']))
-        print('Recall:    {:.4f}'.format(result_multi['recall']))
-        print('F1 (macro): {:.4f}'.format(result_multi['f1']))
-        print('------------------------------')
-        print('混淆矩阵 (行=真实, 列=预测):')
-        print(result_multi['cm'])
-        print('==============================')
-
-        # 记录结果到日志
-        log_error('方式三训练结果', f'股票数: {len(stock_data_list_multi)}, Accuracy: {result_multi["accuracy"]*100:.2f}%, F1: {result_multi["f1"]:.4f}')
-    #endregion
