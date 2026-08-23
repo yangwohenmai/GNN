@@ -1470,7 +1470,7 @@ def run_method_four(model_name, net_mode, stock_list=None):
         'netMode': net_mode,
     }
     # 加载模型和归一化参数
-    checkpoint = torch.load(filepath, weights_only=True)
+    checkpoint = torch.load(filepath, weights_only=False)
     model_state_dict = checkpoint['model_state_dict']
     scaler = checkpoint.get('scaler')
     if scaler is not None:
@@ -1554,7 +1554,7 @@ def run_method_four_rolling(model_name, net_mode, stock_list=None, test_ratio=0.
     }
 
     # 加载模型和归一化参数
-    checkpoint = torch.load(filepath, weights_only=True)
+    checkpoint = torch.load(filepath, weights_only=False)
     model_state_dict = checkpoint['model_state_dict']
     scaler = checkpoint.get('scaler')
     if scaler is not None:
@@ -1723,7 +1723,7 @@ def run_method_four_multi_stock(model_name, net_mode, stock_list=None):
     }
 
     # 加载模型和归一化参数
-    checkpoint = torch.load(filepath, weights_only=True)
+    checkpoint = torch.load(filepath, weights_only=False)
     model_state_dict = checkpoint['model_state_dict']
     scaler = checkpoint.get('scaler')
     if scaler is not None:
@@ -1880,13 +1880,13 @@ if __name__ == '__main__':
 
     # ====== 方式三：多股票拼大图训练（所有股票拼成一个大图，共用一个模型） ======
     #run_method_three(compare_modes_multi=['onlyGAT'], ifSaveModel=True)  # 单模式训练，自动从沪深300取前 maxStockCount 只股票
-    run_method_three(compare_modes_multi=['mixed', 'onlyGAT'], ifSaveModel=True)  # 对比多种网络模式，训练完保存模型
+    #run_method_three(compare_modes_multi=['mixed', 'onlyGAT'], ifSaveModel=True)  # 对比多种网络模式，训练完保存模型
     #run_method_three(stock_list_multi=['000009.SZ', '000010.SZ'], compare_modes_multi=['onlyGAT'], ifSaveModel=True)  # 手动指定股票列表
 
     # ====== 方式四：加载已保存模型直接预测（不训练，用于测试已训练好的模型） ======
     #run_method_four(model_name='20250101_onlyGAT', net_mode='onlyGAT')  # 加载模型预测，自动从沪深300取前 maxStockCount 只股票
     #run_method_four(model_name='20250101_mixed', net_mode='mixed', stock_list=['600519.SH', '601318.SH', '601398.SH'])  # 手动指定股票，用指定股票的数据做预测
-    #run_method_four(model_name='20250101_onlyGAT', net_mode='onlyGAT', stock_list=['600519.SH', '601318.SH', '601398.SH'])  # 手动指定股票，用指定股票的数据做预测
+    #run_method_four(model_name='20260821_onlyGAT', net_mode='onlyGAT', stock_list=['600519.SH', '601318.SH', '601398.SH'])  # 手动指定股票，用指定股票的数据做预测
 
     # ====== 方式五：滚动预测（模拟真实交易场景，逐天预测） ======
     #run_method_four_rolling(model_name='20250101_onlyGAT', net_mode='onlyGAT', stock_list=['600519.SH', '601318.SH', '601398.SH'])  # 手动指定股票，滚动预测
