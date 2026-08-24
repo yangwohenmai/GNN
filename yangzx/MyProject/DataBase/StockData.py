@@ -438,6 +438,176 @@ def DownloadStockData(stock_list=None, indexCode=None, startYear=2020, saveDir=N
     print(f'下载完成！成功更新: {success_count}，跳过(已是最新): {skip_count}，失败: {fail_count}，总计: {total}')
     print(f'缓存目录: {os.path.abspath(saveDir)}')
 
+# 按日期批量更新股票行情数据到本地txt缓存（高效模式，一次获取某天所有股票数据）
+# start_date: 开始日期，如 '2026-08-01' 或 '20260801'
+# end_date: 结束日期
+# saveDir: 本地缓存目录，每只股票一个txt文件（如 000001.SZ.txt）
+# 注意：只更新已有txt文件的股票，没有文件的股票会跳过
+def UpdateStockDataByDate(start_date, end_date, saveDir=None):
+    """
+    按日期批量更新股票行情数据（高效模式）
+    使用 query_daily_history_k_AStock 一次获取某天所有股票数据
+    相比 DownloadStockData（按股票遍历），网络请求次数大幅减少
+    
+    示例：
+      # 更新 2026-08-20 到 2026-08-22 的所有股票数据
+      UpdateStockDataByDate('2026-08-20', '2026-08-22')
+      
+      # 也支持无分隔符格式
+      UpdateStockDataByDate('20260820', '20260822')
+    """
+    if saveDir is None:
+        saveDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'StockDataCache')
+    if not os.path.exists(saveDir):
+        print(f'缓存目录不存在: {saveDir}')
+        return
+    
+    # 标准化日期格式
+    def normalize_date(d):
+        if '-' in d:
+            return d
+        elif len(d) == 8:
+            return f'{d[:4]}-{d[4:6]}-{d[6:8]}'
+        else:
+            return d
+    
+    start_date = normalize_date(start_date)
+    end_date = normalize_date(end_date)
+    
+    print(f'\n{"=" * 50}')
+    print(f'按日期批量更新股票行情数据')
+    print(f'{"=" * 50}')
+    print(f'日期范围: {start_date} ~ {end_date}')
+    print(f'缓存目录: {os.path.abspath(saveDir)}')
+    
+    # 获取日期范围内的所有交易日
+    lg = bs.login()
+    print(f'login respond error_code:{lg.error_code}')
+    print(f'login respond error_msg:{lg.error_msg}')
+    
+    try:
+        # 查询交易日列表
+        rs = bs.query_trade_dates(start_date=start_date, end_date=end_date)
+        if rs.error_msg != 'success':
+            print(f'查询交易日失败: {rs.error_msg}')
+            return
+        
+        trading_dates = [row[0] for row in rs.data if row[1] == '1']  # is_trading_day=1
+        if not trading_dates:
+            print(f'日期范围内无交易日: {start_date} ~ {end_date}')
+            return
+        
+        print(f'交易日数量: {len(trading_dates)}')
+        print(f'交易日列表: {trading_dates}')
+        
+        # 字段映射：query_daily_history_k_AStock 返回的字段索引
+        # ['date', 'code', 'open', 'high', 'low', 'close', 'preclose', 'volume', 
+        #  'amount', 'adjustflag', 'turn', 'tradestatus', 'pctChg', ...]
+        # 文件字段: code,date,open,high,low,close,volume,pctChg
+        FIELD_INDEXES = [1, 0, 2, 3, 4, 5, 7, 12]  # 对应 code,date,open,high,low,close,volume,pctChg
+        FILE_FIELDS = "code,date,open,high,low,close,volume,pctChg"
+        
+        total_update = 0
+        total_skip = 0
+        total_no_file = 0
+        
+        # 遍历每个交易日
+        for trade_date in trading_dates:
+            print(f'\n[{trade_date}] 获取所有股票数据...')
+            
+            # 一次获取当天所有A股的行情数据
+            rs = bs.query_daily_history_k_AStock(date=trade_date)
+            if rs.error_msg != 'success':
+                print(f'  查询失败: {rs.error_msg}')
+                continue
+            
+            if not rs.data or len(rs.data) == 0:
+                print(f'  无数据')
+                continue
+            
+            print(f'  获取 {len(rs.data)} 只股票数据')
+            
+            # 按股票代码分组
+            stock_data_map = {}
+            for row in rs.data:
+                bs_code = row[1]  # sh.600000
+                # 转换代码格式：sh.600000 → 600000.SH
+                parts = bs_code.split('.')
+                if len(parts) != 2:
+                    continue
+                stock_code = f'{parts[1].upper()}.{parts[0]}'
+                stock_data_map[stock_code] = row
+            
+            # 统计
+            day_update = 0
+            day_skip = 0
+            day_no_file = 0
+            
+            # 遍历每只股票
+            for stock_code, row_data in stock_data_map.items():
+                filepath = os.path.join(saveDir, f'{stock_code}.txt')
+                
+                # 检查文件是否存在
+                if not os.path.exists(filepath):
+                    day_no_file += 1
+                    continue
+                
+                # 读取文件最后一行，获取最新日期
+                last_date = None
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    if len(lines) > 1:
+                        last_line = lines[-1].strip()
+                        if last_line:
+                            last_date = last_line.split(',')[1]  # 第2列是date
+                except Exception as e:
+                    print(f'  {stock_code} 读取文件异常: {e}')
+                    continue
+                
+                # 判断是否需要追加
+                if last_date and last_date >= trade_date:
+                    day_skip += 1
+                    continue
+                
+                # 提取需要的字段
+                extracted = [row_data[i] for i in FIELD_INDEXES]
+                
+                # 检查文件末尾是否有换行符
+                need_newline = False
+                with open(filepath, 'rb') as f:
+                    f.seek(0, 2)  # 移到文件末尾
+                    if f.tell() > 0:
+                        f.seek(-1, 2)  # 回退一个字节
+                        if f.read(1) != b'\n':
+                            need_newline = True
+                
+                # 追加数据
+                with open(filepath, 'a', encoding='utf-8') as f:
+                    if need_newline:
+                        f.write('\n')
+                    f.write(','.join(extracted) + '\n')
+                
+                day_update += 1
+            
+            print(f'  更新: {day_update}, 跳过(已是最新): {day_skip}, 无文件: {day_no_file}')
+            total_update += day_update
+            total_skip += day_skip
+            total_no_file += day_no_file
+        
+    except Exception as e:
+        print(f'更新过程异常: {e}')
+    finally:
+        bs.logout()
+    
+    # 汇总
+    print(f'\n{"=" * 50}')
+    print(f'更新完成！')
+    print(f'{"=" * 50}')
+    print(f'总更新: {total_update} 条')
+    print(f'总跳过(已是最新): {total_skip} 条')
+    print(f'总跳过(无文件): {total_no_file} 条')
+
 # 主函数
 if __name__ == '__main__':
     import StockPool
@@ -455,6 +625,12 @@ if __name__ == '__main__':
 
     # 自定义缓存目录和起始年份
     # DownloadStockData(indexCode='hs300', startYear=2018, saveDir='D:/my_cache')
+    #endregion
+
+    #region ========== UpdateStockDataByDate 调用示例（按日期批量更新，高效模式） ==========
+    # 更新指定日期范围的所有股票数据（只更新已有txt文件的股票）
+    # UpdateStockDataByDate('2026-08-20', '2026-08-22')
+    # UpdateStockDataByDate('20260820', '20260822')  # 也支持无分隔符格式
     #endregion
 
     #region ========== GetStockPriceFromTxt 调用示例 ==========
