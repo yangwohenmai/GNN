@@ -117,6 +117,47 @@ def GetStockPriceDWMBaostock(stockCode, endDate=dt.datetime.today(), period=1401
         OrderDic[value[1]] = dic
     return OrderDic
 
+# 从本地txt缓存读取股票行情数据（返回格式与GetStockPriceDWMBaostock完全一致）
+# stockCode: 股票代码，示例000001.SZ（对应缓存文件 000001.SZ.txt）
+# endDate: 截止日期，格式"20260801"，空字符串则取文件中最新日期
+# period: 向前取多少个自然日
+# saveDir: 本地缓存目录，默认 StockDataCache/
+def GetStockPriceFromTxt(stockCode, endDate=dt.datetime.today(), period=1401, saveDir=None):
+    if saveDir is None:
+        saveDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'StockDataCache')
+    filepath = os.path.join(saveDir, f'{stockCode}.txt')
+    if not os.path.exists(filepath):
+        print(f"本地缓存文件不存在：{filepath}")
+        return False
+    # 处理endDate参数（与GetStockPriceDWMBaostock保持一致）
+    if endDate == "" or isinstance(endDate, dt.datetime):
+        if endDate == "":
+            endDate = dt.datetime.today()
+    else:
+        endDate = dt.datetime.strptime(endDate, "%Y%m%d")
+    startDate = (endDate - dt.timedelta(period)).strftime("%Y-%m-%d")
+    endDateStr = endDate.strftime("%Y-%m-%d")
+    # 读取txt文件，按日期范围截取
+    OrderDic = typing.OrderedDict()
+    with open(filepath, 'r', encoding='utf-8') as f:
+        header = f.readline().strip()  # 跳过表头
+        fields = header.split(',')
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            values = line.split(',')
+            row_date = values[1]  # 第2列是date
+            if startDate <= row_date <= endDateStr:
+                dic = dict()
+                for item in range(len(fields)):
+                    dic[fields[item]] = values[item]
+                OrderDic[row_date] = dic
+    if len(OrderDic) == 0:
+        print(f"本地缓存无匹配数据：{stockCode}（{startDate} ~ {endDateStr}）")
+        return False
+    return OrderDic
+
 # 获取股票(分钟)行情数据
 # stockCode: 示例sh.600000
 # fields: 返回列字段，分钟数据与日月周数据略有不同，详见文档
@@ -147,10 +188,297 @@ def GetStockPriceMinBaostock(stockCode, startdate, endDate=time.strftime("%Y-%m-
         OrderDic[value[1]] = dic
     return OrderDic
 
+# 下载指数成分股列表到本地txt缓存
+# indexCode: 'hs300'=沪深300，'zz500'=中证500，'sz50'=上证50，'all'=全市场，None=全部下载
+# saveDir: 缓存目录，默认 StockDataCache/
+def DownloadStockPoolList(indexCode=None, saveDir=None):
+    _this_dir = os.path.dirname(os.path.abspath(__file__))
+    if _this_dir not in sys.path:
+        sys.path.append(_this_dir)
+    import StockPool
+    if saveDir is None:
+        saveDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'StockDataCache')
+    if not os.path.exists(saveDir):
+        os.makedirs(saveDir)
+    def _get_all_stock_with_fallback():
+        """获取全市场股票列表，非交易日自动往前找最近的交易日"""
+        for days_back in range(30):
+            query_date = (dt.datetime.today() - dt.timedelta(days=days_back)).strftime('%Y-%m-%d')
+            result = StockPool.GetALLStockListBaostock(query_date)
+            if len(result) > 0:
+                if days_back > 0:
+                    print(f'今天非交易日，使用 {query_date} 的全市场数据')
+                return result
+        return {}
+    index_map = {
+        'hs300': ('沪深300', StockPool.GetHS300StockListBaostock),
+        'zz500': ('中证500', StockPool.GetZZ500StockListBaostock),
+        'sz50':  ('上证50',  StockPool.GetSZ50StockListBaostock),
+        'all':   ('全市场',  _get_all_stock_with_fallback),
+    }
+    # 确定要下载的列表
+    if indexCode is None:
+        download_keys = list(index_map.keys())
+    else:
+        key = indexCode.lower()
+        if key not in index_map:
+            print(f'错误：不支持的指数代码 "{indexCode}"，可选: hs300, zz500, sz50, all')
+            return
+        download_keys = [key]
+    lg = bs.login()
+    print(f'login respond error_code:{lg.error_code}')
+    print(f'login respond error_msg:{lg.error_msg}')
+    try:
+        for key in download_keys:
+            name, func = index_map[key]
+            stock_dict = func()
+            stock_list = list(stock_dict.keys())
+            filepath = os.path.join(saveDir, f'stockpool_{key}.txt')
+            with open(filepath, 'w', encoding='utf-8') as f:
+                for code in stock_list:
+                    f.write(code + '\n')
+            print(f'{name}成分股列表已保存：{filepath}，共 {len(stock_list)} 只')
+    finally:
+        bs.logout()
+
+# 从本地txt读取指数成分股列表（返回格式与StockPool.GetHS300StockListBaostock等一致）
+# indexCode: 'hs300'=沪深300，'zz500'=中证500，'sz50'=上证50，'all'=全市场
+# saveDir: 缓存目录，默认 StockDataCache/
+# 返回: dict，如 {'000001.SZ': '000001', '600519.SH': '600519', ...}；文件不存在返回False
+def GetStockPoolListFromTxt(indexCode='hs300', saveDir=None):
+    if saveDir is None:
+        saveDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'StockDataCache')
+    filepath = os.path.join(saveDir, f'stockpool_{indexCode.lower()}.txt')
+    if not os.path.exists(filepath):
+        print(f"股票池缓存文件不存在：{filepath}")
+        return False
+    stock_dic = {}
+    with open(filepath, 'r', encoding='utf-8') as f:
+        for line in f:
+            code = line.strip()
+            if code:
+                stock_dic[code] = code.split('.')[0]
+    return stock_dic
+
+# 批量下载/增量更新股票行情数据到本地txt缓存
+# stock_list: 指定股票代码列表（如['000001.SZ', '600519.SH']），传入则只下载列表中的股票
+# indexCode: 按指数下载，'hs300'=沪深300，'zz500'=中证500，'sz50'=上证50，None=全市场
+# startYear: 首次下载起始年份（增量更新时自动检测已有数据的最后日期，仅补下载缺失部分）
+# saveDir: 本地缓存目录，每只股票一个txt文件（如 000001.SZ.txt）
+def DownloadStockData(stock_list=None, indexCode=None, startYear=2020, saveDir=None):
+    """
+    批量下载/增量更新股票行情数据到本地txt缓存
+    三种模式：
+      1. 指定stock_list → 只下载列表中的股票
+      2. 不传stock_list，指定indexCode → 按指数下载（hs300/zz500/sz50）
+      3. 都不传 → 全市场股票下载
+    """
+    if saveDir is None:
+        saveDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'StockDataCache')
+    if not os.path.exists(saveDir):
+        os.makedirs(saveDir)
+
+    # --- 确定股票列表 ---
+    if stock_list:
+        # 模式一：指定股票列表
+        download_list = list(stock_list)
+        print(f'模式一：指定股票列表，共 {len(download_list)} 只')
+    else:
+        # 模式二/三：需要登录baostock获取码表
+        _this_dir = os.path.dirname(os.path.abspath(__file__))
+        if _this_dir not in sys.path:
+            sys.path.append(_this_dir)
+        import StockPool
+        lg = bs.login()
+        print(f'login respond error_code:{lg.error_code}')
+        print(f'login respond error_msg:{lg.error_msg}')
+        try:
+            if indexCode:
+                # 模式二：按指数下载
+                index_map = {
+                    'hs300': ('沪深300', StockPool.GetHS300StockListBaostock),
+                    'zz500': ('中证500', StockPool.GetZZ500StockListBaostock),
+                    'sz50':  ('上证50',  StockPool.GetSZ50StockListBaostock),
+                }
+                key = indexCode.lower()
+                if key not in index_map:
+                    print(f'错误：不支持的指数代码 "{indexCode}"，可选: hs300, zz500, sz50')
+                    return
+                name, func = index_map[key]
+                download_dict = func()
+                download_list = list(download_dict.keys())
+                print(f'模式二：按{name}下载，成分股共 {len(download_list)} 只')
+            else:
+                # 模式三：全市场下载
+                today_str = dt.datetime.today().strftime('%Y-%m-%d')
+                download_dict = StockPool.GetALLStockListBaostock(today_str)
+                download_list = list(download_dict.keys())
+                print(f'模式三：全市场下载，共 {len(download_list)} 只')
+        finally:
+            bs.logout()
+
+    # --- 遍历下载/增量更新 ---
+    fields = "code,date,open,high,low,close,volume,pctChg"
+    success_count = 0
+    skip_count = 0
+    fail_count = 0
+    total = len(download_list)
+
+    lg = bs.login()
+    print(f'login respond error_code:{lg.error_code}')
+    print(f'login respond error_msg:{lg.error_msg}')
+    try:
+        # 先查询一次参考股票，获取baostock当前最新交易日（避免逐只判断时产生无效网络请求）
+        # 往前查7天，防止当天未收盘或节假日无数据的情况
+        latest_trading_date = dt.datetime.today().strftime('%Y-%m-%d')
+        ref_start = (dt.datetime.today() - dt.timedelta(days=7)).strftime('%Y-%m-%d')
+        ref_end = dt.datetime.today().strftime('%Y-%m-%d')
+        ref_rs = bs.query_history_k_data_plus(
+            'sh.000001', 'code,date',
+            start_date=ref_start, end_date=ref_end,
+            frequency='d', adjustflag='3'
+        )
+        if ref_rs.error_msg == 'success' and ref_rs.data and len(ref_rs.data) > 0:
+            latest_trading_date = ref_rs.data[-1][1]
+            print(f'baostock最新交易日: {latest_trading_date}')
+        else:
+            print(f'查询最新交易日失败，使用今天日期: {latest_trading_date}')
+
+        for i, code in enumerate(download_list):
+            # 转换代码格式：000001.SZ → sz.000001
+            parts = code.split('.')
+            if len(parts) != 2:
+                print(f'[{i+1}/{total}] {code} 代码格式错误，跳过')
+                fail_count += 1
+                continue
+            bs_code = parts[1].lower() + '.' + parts[0]
+            filepath = os.path.join(saveDir, f'{code}.txt')
+
+            # 检查本地文件，获取最后日期（用于增量判断）
+            last_date = None
+            if os.path.exists(filepath):
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    if len(lines) > 1:
+                        last_line = lines[-1].strip()
+                        if last_line:
+                            last_date = last_line.split(',')[1]  # 第2列是date
+                except Exception as e:
+                    print(f'[{i+1}/{total}] {code} 读取本地文件异常: {e}，将重新下载')
+
+            # 计算下载范围
+            if last_date:
+                # 增量更新：本地最后日期 >= baostock最新交易日 → 数据已是最新，跳过
+                if last_date >= latest_trading_date:
+                    print(f'[{i+1}/{total}] {code} 数据已是最新（{last_date}），跳过')
+                    skip_count += 1
+                    continue
+                # 从最后日期的下一天开始，下载到最新交易日
+                start_date = (dt.datetime.strptime(last_date, '%Y-%m-%d') + dt.timedelta(days=1)).strftime('%Y-%m-%d')
+                end_date = latest_trading_date
+            else:
+                # 首次下载：从startYear开始
+                start_date = f'{startYear}-01-01'
+                end_date = latest_trading_date
+
+            # 查询baostock增量数据
+            df = bs.query_history_k_data_plus(
+                bs_code, fields,
+                start_date=start_date, end_date=end_date,
+                frequency="d", adjustflag="3"
+            )
+
+            if df.error_msg != 'success':
+                print(f'[{i+1}/{total}] {code} 查询失败: {df.error_msg}')
+                fail_count += 1
+                continue
+
+            new_rows = df.data
+            if not new_rows or len(new_rows) == 0:
+                print(f'[{i+1}/{total}] {code} 无新增数据（{start_date} ~ {end_date}）')
+                skip_count += 1
+                continue
+
+            # 写入文件（新建文件写表头，已有文件追加数据）
+            is_new_file = not os.path.exists(filepath)
+            if not is_new_file:
+                # 检查文件末尾是否有换行符，没有则补一个，防止新数据与最后一行拼接
+                with open(filepath, 'rb') as f:
+                    f.seek(0, 2)  # 移到文件末尾
+                    if f.tell() > 0:
+                        f.seek(-1, 2)  # 回退一个字节
+                        if f.read(1) != b'\n':
+                            is_need_newline = True
+                        else:
+                            is_need_newline = False
+                    else:
+                        is_need_newline = False
+            with open(filepath, 'a', encoding='utf-8') as f:
+                if is_new_file:
+                    f.write(fields + '\n')
+                elif is_need_newline:
+                    f.write('\n')
+                for row in new_rows:
+                    f.write(','.join(row) + '\n')
+
+            success_count += 1
+            print(f'[{i+1}/{total}] {code} 新增 {len(new_rows)} 条（{start_date} ~ {end_date}）')
+
+            # 每下载完一只股票休眠1秒，避免请求过于频繁
+            time.sleep(1)
+
+    except Exception as e:
+        print(f'下载过程异常: {e}')
+    finally:
+        bs.logout()
+
+    # 汇总
+    print(f'\n{"=" * 50}')
+    print(f'下载完成！成功更新: {success_count}，跳过(已是最新): {skip_count}，失败: {fail_count}，总计: {total}')
+    print(f'缓存目录: {os.path.abspath(saveDir)}')
+
 # 主函数
 if __name__ == '__main__':
     import StockPool
     print('begin'+str(dt.datetime.now()))
+
+    #region ========== DownloadStockData 调用示例 ==========
+    # 模式一：只下载指定股票
+    #DownloadStockData(stock_list=['000001.SZ', '600519.SH'])
+
+    # 模式二：按指数下载（hs300=沪深300, zz500=中证500, sz50=上证50）
+    #DownloadStockData(indexCode='zz500')
+
+    # 模式三：全市场下载
+    # DownloadStockData()
+
+    # 自定义缓存目录和起始年份
+    # DownloadStockData(indexCode='hs300', startYear=2018, saveDir='D:/my_cache')
+    #endregion
+
+    #region ========== GetStockPriceFromTxt 调用示例 ==========
+    # 从本地缓存读取行情数据（返回格式与GetStockPriceDWMBaostock完全一致）
+    # result = GetStockPriceFromTxt('000001.SZ', '20260824', 1400)
+    # if result != False:
+    #     keys = list(result.keys())
+    #     print(f'数据条数: {len(result)}')
+    #     print(f'日期范围: {keys[0]} ~ {keys[-1]}')
+    #     print(f'最新一条: {result[keys[-1]]}')
+    #endregion
+
+    #region ========== 股票池列表 调用示例 ==========
+    # 下载股票池列表到本地（有网时执行一次即可）
+    #DownloadStockPoolList()          # 不传参数=一次性下载全部（沪深300+中证500+上证50+全市场）
+    # DownloadStockPoolList('hs300')   # 也可以只下载单个
+
+    # 从本地读取股票池列表（无需联网）
+    # pool = GetStockPoolListFromTxt('hs300')
+    # if pool != False:
+    #     print(f'沪深300成分股: {len(pool)} 只')
+    #     print(f'前5只: {list(pool.keys())[:5]}')
+    #endregion
+
     sampleCount = 50
     dataCount = 0
     #### 登陆系统 ####
@@ -184,3 +512,5 @@ if __name__ == '__main__':
             print("失败代码："+code+"，异常信息："+str(ex))
     print("finish")
     input()
+
+    
