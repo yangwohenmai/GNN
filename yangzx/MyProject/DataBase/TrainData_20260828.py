@@ -170,45 +170,6 @@ def TrainDataMACDWindowK(stockPriceDic, edgeWindowK=3, edgeStride=1):
     data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
     return data
 
-def TrainDataMACDWindowK_NextDay(stockPriceDic, edgeWindowK=3, edgeStride=1):
-    # 次日标签版本（新增函数，老函数TrainDataMACDWindowK保留用于对比实验）
-    # 与TrainDataMACDWindowK的唯一区别：标签前移一天，特征和边构建完全一致
-    #   节点i：特征=第i天数据（含当天flag），标签=第i+1天的flag
-    #   末节点无次日数据，标签填-1，调用方须用mask把它排除在训练/验证/测试之外
-    # 目的：节点i的特征里不再包含节点i自己的答案，从数据构造上消除标签泄漏
-    # 注意：这里的"次日"指序列中的下一个节点。上游已过滤掉flag=-1的交易日，
-    #       故该"次日"是下一个有效信号日，与边按序列相邻连接的方式保持自洽
-    list1 = list()
-    list2 = list()
-    count = len(stockPriceDic)
-    for i in range(1, count):
-        for j in range(min(i, edgeWindowK), 0, -1):
-            if (j - 1) % edgeStride != 0:
-                continue
-            list1.append(i-j)
-            list2.append(i)
-    list3 = list()
-    list3.append(list1)
-    list3.append(list2)
-    edge_index = torch.tensor(np.array(list3), dtype=torch.long)
-
-    dataListx = list()
-    flagList = list()
-    data = list()
-    dayCount = 0
-    for key,f in stockPriceDic.items():
-        dayCount += 1
-        try:
-            dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float(f['pctChg']),dayCount/len(stockPriceDic),f['flag']])
-        except Exception as ex:
-            dataListx.append([float(f['open']),float(f['close']),float(f['low']),float(f['high']),float('0'),dayCount/len(stockPriceDic),f['flag']])
-            #print("TrainDataMACDWindowK_NextDay()->异常交易数据，涨幅补0，异常信息："+str(ex))
-        flagList.append(f['flag'])
-    # 标签前移一天：y[i] = flag[i+1]，末节点无次日标签填-1
-    dataListy = flagList[1:] + [-1]
-    data.append(Data(x=torch.tensor(np.array(dataListx)),y=torch.tensor(np.array(dataListy)),edge_index=edge_index))
-    return data
-
 # 主函数
 if __name__ == '__main__':
     import StockPool
