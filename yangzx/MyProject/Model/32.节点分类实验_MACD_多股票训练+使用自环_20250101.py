@@ -70,10 +70,9 @@ ifOpenClassWeight = False   # 是否启用类别加权损失
 ifOpenBatchNorm = False     # 是否启用BatchNorm
 ifOpenFocalLoss = False     # 是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
 focalLossGamma = 1.0        # Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
-residualHistoryN = 5        # 短残差历史窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影）
+residualHistoryN = 5        # conv1历史注入窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影注入；与抗梯度消失的残差无关）
 edgeWindowK =21            # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
 edgeStride = 3              # 入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
-ifOpenSelfLoops = True      # 是否给卷积层添加自环（标签已前移一天，节点i聚合自身特征不再是抄答案，而是让模型能看到当天行情；False=沿用旧行为，节点i只聚合前K天）
 ifOpenAttentionHeatmap = True  # 是否在训练结束后绘制GAT层热力图（需edgeWindowK>1才有意义，K=1时每节点仅1条入边注意力恒为1）
 ifOpenAblation = False       # 是否启用消融实验模式（开启后遍历ablationModes各组训练并输出对比表，量化GCN/GAT对训练的影响）
 ablationModes = ['mixed', 'onlyGCN', 'onlyGAT']  # 消融实验对比的网络模式列表（mixed=当前GCN-GAT交替基准）
@@ -386,10 +385,9 @@ def plot_metrics(precisions, recalls, f1s, losses):
     plt.legend()
     plt.show()
 
-# GAT层热力图：滞后lag×时间，展示"预测第i天时对前K天历史的注意力分配"
-# 注：ifOpenSelfLoops=False时，每节点入边注意力经softmax后和为1，各列颜色分布可直接横向对比；
-#     ifOpenSelfLoops=True时自环也占一份注意力，但其lag=0不在本图展示范围内，
-#     因此各列之和小于1（差额即模型分给当天的注意力），横向对比时需考虑这一点
+# GAT层热力图：滞后lag×时间，展示“预测第i天时对前K天历史的注意力分配”
+# 注：自环也占一份注意力，但其lag=0不在本图展示范围内，
+#     因此各列之和小于1（差额即模型分给当天的注意力）
 def plot_attention_heatmaps(model, data, priceDic, cfg, train_mask, val_mask, stock_code='', mode=''):
     """
     绘制两张图：1) 每个GAT层一张“滞后×时间”热力图；2) 收盘价/标签与5层平均注意力的对齐视图
@@ -415,7 +413,7 @@ def plot_attention_heatmaps(model, data, priceDic, cfg, train_mask, val_mask, st
     # 前向一次收集GAT层注意力权重 + 每层输入特征
     model.eval()
     with torch.no_grad():
-        _, att_list = model(data.x, data.edge_index, return_attention=True)
+        _, att_list = model(data.x, data.edge_index, batch=data.batch, return_attention=True)
     for h in handles:
         h.remove()
     # 边信息（用于GCN伪注意力计算）
@@ -652,7 +650,7 @@ def log_training_progress(epoch, loss, model, data, train_mask, val_mask, traini
     """
     model.eval()
     with torch.no_grad():
-        out_val = model(data.x, data.edge_index)
+        out_val = model(data.x, data.edge_index, batch=data.batch)
         # 验证集指标（始终需要，早停依赖验证F1）
         predicted_val = torch.argmax(out_val[val_mask], dim=1)
         p_val, r_val, f1_val, _ = precision_recall_fscore_support(data.y[val_mask].cpu(), predicted_val.cpu(), average='macro')
@@ -789,42 +787,43 @@ class Net(torch.nn.Module):
         :param cfg: 超参数字典（dropoutRate/ifOpenBatchNorm/residualHistoryN/ifOpenEdgeDropout/edgeDropoutRate等）
         """
         super(Net, self).__init__()
-        # 自环开关：标签已前移一天（节点i的标签是第i+1天的flag），节点i聚合自身特征不再是抄答案
-        # add_self_loops=False（旧行为）时节点i只聚合i-K~i-1，叠加残差路径也shift排除了x[i]，
-        # 导致模型根本看不到最新一天的行情，相当于白跳一天；add_self_loops=True后节点i可聚合自身
-        self.addSelfLoops = cfg.get('ifOpenSelfLoops', ifOpenSelfLoops)
-        # 10层网络：5个Block，每2层一个Block，维度平滑过渡 7→32→32→64→64→128→128→128→128→64→2
+        # 输入特征维度：优先从 cfg['featDim'] 动态获取（由建图后的数据决定），
+        # 缺省回退7（兼容旧checkpoint/未注入featDim的cfg）
+        feat_dim = cfg.get('featDim', 7)
+        self.feat_dim = feat_dim
+        # 10层网络：5个Block，每2层一个Block，维度平滑过渡 feat→32→32→64→64→128→128→128→128→64→2
         # 网络结构模式：mixed(GCN-GAT交替)/onlyGCN(全GCN)/onlyGAT(全GAT)，消融实验用
         self.netMode = cfg.get('netMode', 'mixed')
-        # 10层维度配置：(in_dim, out_dim)，三种模式维度完全一致，仅层类型不同
-        dims = [(7, 32), (32, 32), (32, 64), (64, 64), (64, 128),
+        # 10层维度配置：(in_dim, out_dim)，三种模式维度完全一致，仅层类型不同（首层输入维度随特征列数动态变化）
+        dims = [(feat_dim, 32), (32, 32), (32, 64), (64, 64), (64, 128),
                 (128, 128), (128, 128), (128, 128), (128, 64), (64, 2)]
         # 记录每层是否为GAT（用于注意力收集：仅GAT层可返回attention权重）
         self.is_gat = []
         for i, (in_d, out_d) in enumerate(dims):
             if self.netMode == 'onlyGCN':
-                layer = GCNConv(in_d, out_d, add_self_loops=self.addSelfLoops)
+                layer = GCNConv(in_d, out_d)
                 self.is_gat.append(False)
             elif self.netMode == 'onlyGAT':
-                layer = GATConv(in_d, out_d, add_self_loops=self.addSelfLoops)
+                layer = GATConv(in_d, out_d)
                 self.is_gat.append(True)
             else:  # mixed: 奇数层(1,3,5,7,9)=GCN, 偶数层(2,4,6,8,10)=GAT
                 if i % 2 == 0:
-                    layer = GCNConv(in_d, out_d, add_self_loops=self.addSelfLoops)
+                    layer = GCNConv(in_d, out_d)
                     self.is_gat.append(False)
                 else:
-                    layer = GATConv(in_d, out_d, add_self_loops=self.addSelfLoops)
+                    layer = GATConv(in_d, out_d)
                     self.is_gat.append(True)
             setattr(self, f'conv{i+1}', layer)
         self.dropout = torch.nn.Dropout(cfg['dropoutRate'])
         self.edge_dropout_rate = cfg['edgeDropoutRate'] if cfg['ifOpenEdgeDropout'] else 0.0
         self.residualHistoryN = cfg['residualHistoryN']
-        # 短残差投影层（维度不匹配时做线性投影对齐）
-        # residualHistoryN=1时输入7维；n>1时拼接n个历史节点特征，输入7*n维
-        self.proj1 = torch.nn.Linear(7 * cfg['residualHistoryN'], 32)    # conv1残差（前n个历史节点特征拼接后投影）
-        self.proj3 = torch.nn.Linear(32, 64)   # conv3残差
-        self.proj5 = torch.nn.Linear(64, 128)  # conv5残差
-        self.proj9 = torch.nn.Linear(128, 64)  # conv9残差
+        # proj1为conv1的历史信息注入通道（非残差：输入源是历史节点特征而非本层输入，不抗梯度消失）
+        # proj3/5/9为真正的残差投影层（维度不匹配时做线性投影对齐，近似恒等捷径）
+        # residualHistoryN=1时输入feat_dim维；n>1时拼接n个历史节点特征，输入feat_dim*n维
+        self.proj1 = torch.nn.Linear(feat_dim * cfg['residualHistoryN'], 32)    # conv1历史注入（前n个历史节点特征拼接后投影）
+        self.proj3 = torch.nn.Linear(32, 64)   # conv3残差投影（32→64）
+        self.proj5 = torch.nn.Linear(64, 128)  # conv5残差投影（64→128）
+        self.proj9 = torch.nn.Linear(128, 64)  # conv9残差投影（128→64）
         # 是否启用BatchNorm
         self.ifOpenBatchNorm = cfg['ifOpenBatchNorm']
         if self.ifOpenBatchNorm:
@@ -847,25 +846,44 @@ class Net(torch.nn.Module):
             return out
         return conv(x, edge_index)
 
-    def forward(self, x, edge_index, return_attention=False):
+    def forward(self, x, edge_index, batch=None, return_attention=False):
         # return_attention=True时额外返回5个GAT层的注意力权重列表（仅可视化时用，训练路径不受影响）
         att_list = [] if return_attention else None
-        #训练时随机丢弃边，防止过度依赖特定邻居
+        #训练时随机丢弃边，防止过度依赖特定邻居。
+        #安全性：自环不会误删——建图产生的edge_index本身不含自环，
+        #自环由GATConv/GCNConv在forward内部添加（晚于dropout_edge，已用p=1.0极端用例验证）
         if self.training and self.edge_dropout_rate > 0:
             edge_index, _ = dropout_edge(edge_index, p=self.edge_dropout_rate)
         # === Block 1: conv1 + conv2（32维平台，含跨层残差） ===
-        # conv1: 短残差使用前residualHistoryN个历史节点的特征拼接（shift排除当日x[i]），防止数据泄露
-        # 注：标签已前移一天，当日x[i]不再是答案；本版本通过自环让卷积层看到x[i]，
-        #     残差路径仍保持只用历史节点（不同时改两处，保证效果可归因）
+        # conv1: 历史信息注入（非残差）——前residualHistoryN个历史节点的特征拼接后经proj1投影，与conv1输出相加。
+        # 作用：给节点一条"连续N天历史特征"的直连数据通道，与边窗口的稀疏注意力聚合互补；
+        # 输入源是历史特征而非本层输入，不提供恒等梯度捷径，不承担抗梯度消失职责。
+        # 历史范围用shift排除当日x[i]，是标签平移前的防泄露遗留设计；
+        # 注：标签已前移一天，当日x[i]不再是答案，卷积层经自环可看x[i]，注入通道仍保守地只用历史
         # n=1时: shifted_x[i] = x[i-1]（当前行为）
         # n>1时: 拼接 x[i-n], x[i-n+1], ..., x[i-1]（缺失位置补零向量）
+        # 多股票模式：按段内shift，避免跨股票泄漏（batch=None时退化为全局shift）
+        # 注意：不能用 shifted_k[mask][k:]=... 链式索引赋值（布尔索引返回副本，赋值不生效）
         shifted_list = []
         for k in range(self.residualHistoryN, 0, -1):
-            shifted_k = torch.zeros_like(x)
-            shifted_k[k:] = x[:-k]
+            if batch is not None:
+                # 按股票分段shift：段内节点取本段前k个位置的特征，段首k个节点补零
+                segs = []
+                for seg_id in range(int(batch.max().item()) + 1):
+                    seg_x = x[batch == seg_id]
+                    if seg_x.size(0) > k:
+                        pad = torch.zeros(k, x.size(1), device=x.device, dtype=x.dtype)
+                        segs.append(torch.cat([pad, seg_x[:-k]], dim=0))
+                    else:
+                        segs.append(torch.zeros_like(seg_x))
+                shifted_k = torch.cat(segs, dim=0)
+            else:
+                # 单股票：全局shift
+                shifted_k = torch.zeros_like(x)
+                shifted_k[k:] = x[:-k]
             shifted_list.append(shifted_k)
         shifted_x = torch.cat(shifted_list, dim=1)
-        res = self.proj1(shifted_x)
+        res = self.proj1(shifted_x)  # 历史注入项（非恒等残差）
         x = self._call_conv(self.conv1, x, edge_index, att_list, self.is_gat[0])
         if self.ifOpenBatchNorm: x = self.bn1(x)
         x = F.relu(x + res)
@@ -964,7 +982,7 @@ def evaluate_test(model, data, test_mask):
     """
     model.eval()
     with torch.no_grad():
-        test_predict = model(data.x, data.edge_index)[test_mask]
+        test_predict = model(data.x, data.edge_index, batch=data.batch)[test_mask]
         max_index = torch.argmax(test_predict, dim=1)
         test_true = data.y[test_mask]
     test_pred = max_index.cpu().numpy()
@@ -1043,6 +1061,9 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
     set_seed(2)  # 每组配置从相同随机状态出发，保证公平对比
     epochs = trainingTimes if epochs is None else epochs
     data, train_mask, val_mask, test_mask, scaler = build_graph(stock_data_list, cfg)
+    # 注入实际特征维度：Net中conv1输入维度和proj1历史注入维度据此动态确定，避免特征列数变化时维度硬编码失配。
+    # 用新dict不污染原cfg（cfg会被打印到日志/超参数文件，保持干净）
+    cfg = {**cfg, 'featDim': data.x.size(1)}
     model = Net(cfg).to(device)
     # 定义损失函数和优化器
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=0.0005)
@@ -1064,7 +1085,7 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
         if cfg['ifOpenFocalLoss']:
             print(f"Focal Loss已启用: gamma={cfg['focalLossGamma']}, alpha={class_weight_tensor}")
         if cfg['residualHistoryN'] > 1:
-            print(f"短残差历史窗口: {cfg['residualHistoryN']}步拼接（维度 {7*cfg['residualHistoryN']}→32）")
+            print(f"conv1历史注入窗口: {cfg['residualHistoryN']}步拼接（维度 {model.feat_dim*cfg['residualHistoryN']}→32）")
         print(f"入边窗口: K={cfg['edgeWindowK']}, 稀疏间隔={cfg['edgeStride']}（每节点直接聚合前{cfg['edgeWindowK']}天内隔{cfg['edgeStride']}取一，边数={data.edge_index.shape[1]}）")
 
     precisions, recalls, f1s, losses = [], [], [], []
@@ -1088,16 +1109,16 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
         'data': data,
         'test_mask': test_mask,
         'periodRange': periodRange,
-        'edgeWindowK': edgeWindowK,
-        'edgeStride': edgeStride,
-        'residualHistoryN': residualHistoryN
+        'edgeWindowK': cfg['edgeWindowK'],
+        'edgeStride': cfg['edgeStride'],
+        'residualHistoryN': cfg['residualHistoryN']
     }
     
     # 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
     model.train()
     for epoch in range(epochs):
         optimizer.zero_grad()
-        out = model(data.x, data.edge_index)    #模型的输入有节点特征还有边特征,使用的是全部数据
+        out = model(data.x, data.edge_index, batch=data.batch)    #模型的输入有节点特征还有边特征,使用的是全部数据
         if focal_loss_fn is not None:
             loss = focal_loss_fn(out[train_mask], data.y[train_mask])
         else:
@@ -1227,7 +1248,6 @@ def run_single_stock_compare(stockCode, modes, dataDate=dataDate, periodRange=pe
         'ifOpenFocalLoss': ifOpenFocalLoss,
         'focalLossGamma': focalLossGamma,
         'earlyStopPatience': earlyStopPatience,
-        'ifOpenSelfLoops': ifOpenSelfLoops,
     }
 
     # --- 逐模式训练 ---
@@ -1324,7 +1344,6 @@ def run_all_func(modes):
         'ifOpenFocalLoss': ifOpenFocalLoss,
         'focalLossGamma': focalLossGamma,
         'earlyStopPatience': earlyStopPatience,
-        'ifOpenSelfLoops': ifOpenSelfLoops,
     }
     if ifOpenAblation:
         # 消融实验模式：遍历各模式组训练，输出对比表+热力图，量化GCN/GAT对训练的影响（未传modes时用ablationModes）
@@ -1499,7 +1518,6 @@ def run_all_func_lite(modes):
         'ifOpenFocalLoss': ifOpenFocalLoss,
         'focalLossGamma': focalLossGamma,
         'earlyStopPatience': earlyStopPatience,
-        'ifOpenSelfLoops': ifOpenSelfLoops,
     }
 
     if ifOpenAblation:
@@ -1538,11 +1556,24 @@ def run_all_func_lite(modes):
             for mode in modeList:
                 trial_cfg = {**cfg, 'netMode': mode}
                 doneCount += 1
-                r = run_training(trial_cfg, stock_data_list, quiet=True, epochs=hyperSearchTrainingTimes)
+                try:
+                    r = run_training(trial_cfg, stock_data_list, quiet=True, epochs=hyperSearchTrainingTimes)
+                except Exception as ex:
+                    print(f"[trial {doneCount:2d}/{totalTrials}] 训练失败，跳过：{ex}")
+                    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), f'超参数_{dataDate}.txt'), 'a', encoding='utf-8') as f:
+                        f.write(f"[trial {doneCount}/{totalTrials}] 训练失败跳过  {trial_cfg}\n")
+                    continue
                 trial_results.append((r['best_val_f1'], r, trial_cfg))
-                log_comparison_result(f'{stockCode}-trial{doneCount}', [(mode, r, trial_cfg)], f'超参数_{dataDate}.txt')
+                # 写入txt：单行紧凑格式（混淆矩阵换行替换为空格，保证一行一条）
+                cm_str = str(r['cm']).replace('\n', ' ')
+                log_line = f"[trial {doneCount}/{totalTrials}] valF1={r['best_val_f1']:.4f}(第{r['best_epoch']}轮) | test[Acc={r['accuracy']:.4f} P={r['precision']:.4f} R={r['recall']:.4f} F1={r['f1']:.4f}] 耗时={r['elapsed']:.0f}s {cm_str} {trial_cfg}\n"
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), f'超参数_{dataDate}.txt'), 'a', encoding='utf-8') as f:
+                    f.write(log_line)
                 print(f"[trial {doneCount:2d}/{totalTrials}] valF1={r['best_val_f1']:.4f}(第{r['best_epoch']}轮) | test[Acc={r['accuracy']:.4f} P={r['precision']:.4f} R={r['recall']:.4f} F1={r['f1']:.4f}] 耗时={r['elapsed']:.0f}s  {trial_cfg}")
         trial_results.sort(key=lambda t: t[0], reverse=True)
+        if len(trial_results) == 0:
+            print('错误：所有trial均训练失败，无搜索结果')
+            return None
         print('\n------ 搜索结果Top5（按验证F1排序） ------')
         for vf1, r, cfg in trial_results[:5]:
             print(f"valF1={vf1:.4f} testF1={r['f1']:.4f}  {cfg}")
@@ -1751,7 +1782,6 @@ def run_method_three(stock_list_multi=None, compare_modes_multi=None, ifSaveMode
         'ifOpenFocalLoss': ifOpenFocalLoss,
         'focalLossGamma': focalLossGamma,
         'earlyStopPatience': earlyStopPatience,
-        'ifOpenSelfLoops': ifOpenSelfLoops,
     }
 
     if len(compare_modes_multi) > 1:
@@ -1883,7 +1913,6 @@ def run_method_four(model_name, net_mode, stock_list=None):
         'ifOpenFocalLoss': ifOpenFocalLoss,
         'focalLossGamma': focalLossGamma,
         'earlyStopPatience': earlyStopPatience,
-        'ifOpenSelfLoops': ifOpenSelfLoops,
         'netMode': net_mode,
     }
     # 加载模型和归一化参数
@@ -1972,7 +2001,6 @@ def run_method_four_rolling(model_name, net_mode, stock_list=None, test_ratio=0.
         'ifOpenFocalLoss': ifOpenFocalLoss,
         'focalLossGamma': focalLossGamma,
         'earlyStopPatience': earlyStopPatience,
-        'ifOpenSelfLoops': ifOpenSelfLoops,
         'netMode': net_mode,
     }
 
@@ -2045,7 +2073,7 @@ def run_method_four_rolling(model_name, net_mode, stock_list=None, test_ratio=0.
                 # 预测
                 model.eval()
                 with torch.no_grad():
-                    out = model(data.x, data.edge_index)
+                    out = model(data.x, data.edge_index, batch=data.batch)
                     pred = torch.argmax(out[last_node_idx]).item()
                 # 真实标签取第test_day天的flag（截断图末节点的y是-1，不可用）
                 label = items[test_day - 1][1]['flag']
@@ -2164,7 +2192,6 @@ def run_live_predict(model_name, net_mode, stock_list=None, is_live=True, max_co
         'ifOpenFocalLoss': ifOpenFocalLoss,
         'focalLossGamma': focalLossGamma,
         'earlyStopPatience': earlyStopPatience,
-        'ifOpenSelfLoops': ifOpenSelfLoops,
         'netMode': net_mode,
     }
     checkpoint = torch.load(filepath, weights_only=False)
@@ -2234,7 +2261,7 @@ def run_live_predict(model_name, net_mode, stock_list=None, is_live=True, max_co
 
             # 预测
             with torch.no_grad():
-                out = model(data.x, data.edge_index)
+                out = model(data.x, data.edge_index, batch=data.batch)
                 pred = torch.argmax(out[predict_idx]).item()
 
             flag_meaning = '买入/持有' if pred == 1 else '卖出/观望'
