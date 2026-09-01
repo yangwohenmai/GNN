@@ -831,10 +831,7 @@ class Net(torch.nn.Module):
         self.dropout = torch.nn.Dropout(cfg['dropoutRate'])
         self.edge_dropout_rate = cfg['edgeDropoutRate'] if cfg['ifOpenEdgeDropout'] else 0.0
         self.residualHistoryN = cfg['residualHistoryN']
-        # proj1为conv1的历史信息注入通道（非残差：输入源是历史节点特征而非本层输入，不抗梯度消失）
-        # proj3/5/9为真正的残差投影层（维度不匹配时做线性投影对齐，近似恒等捷径）
-        # residualHistoryN=1时输入feat_dim维；n>1时拼接n个历史节点特征，输入feat_dim*n维
-        self.proj1 = torch.nn.Linear(feat_dim * cfg['residualHistoryN'], 32)    # conv1历史注入（前n个历史节点特征拼接后投影）
+        # proj3/5/9为残差投影层（维度不匹配时做线性投影对齐，近似恒等捷径）
         self.proj3 = torch.nn.Linear(32, 64)   # conv3残差投影（32→64）
         self.proj5 = torch.nn.Linear(64, 128)  # conv5残差投影（64→128）
         self.proj9 = torch.nn.Linear(128, 64)  # conv9残差投影（128→64）
@@ -869,38 +866,10 @@ class Net(torch.nn.Module):
         if self.training and self.edge_dropout_rate > 0:
             edge_index, _ = dropout_edge(edge_index, p=self.edge_dropout_rate)
         # === Block 1: conv1 + conv2（32维平台，含跨层残差） ===
-        # conv1: 历史信息注入（非残差）——前residualHistoryN个历史节点的特征拼接后经proj1投影，与conv1输出相加。
-        # 作用：给节点一条"连续N天历史特征"的直连数据通道，与边窗口的稀疏注意力聚合互补；
-        # 输入源是历史特征而非本层输入，不提供恒等梯度捷径，不承担抗梯度消失职责。
-        # 历史范围用shift排除当日x[i]，是标签平移前的防泄露遗留设计；
-        # 注：标签已前移一天，当日x[i]不再是答案，卷积层经自环可看x[i]，注入通道仍保守地只用历史
-        # n=1时: shifted_x[i] = x[i-1]（当前行为）
-        # n>1时: 拼接 x[i-n], x[i-n+1], ..., x[i-1]（缺失位置补零向量）
-        # 多股票模式：按段内shift，避免跨股票泄漏（batch=None时退化为全局shift）
-        # 注意：不能用 shifted_k[mask][k:]=... 链式索引赋值（布尔索引返回副本，赋值不生效）
-        shifted_list = []
-        for k in range(self.residualHistoryN, 0, -1):
-            if batch is not None:
-                # 按股票分段shift：段内节点取本段前k个位置的特征，段首k个节点补零
-                segs = []
-                for seg_id in range(int(batch.max().item()) + 1):
-                    seg_x = x[batch == seg_id]
-                    if seg_x.size(0) > k:
-                        pad = torch.zeros(k, x.size(1), device=x.device, dtype=x.dtype)
-                        segs.append(torch.cat([pad, seg_x[:-k]], dim=0))
-                    else:
-                        segs.append(torch.zeros_like(seg_x))
-                shifted_k = torch.cat(segs, dim=0)
-            else:
-                # 单股票：全局shift
-                shifted_k = torch.zeros_like(x)
-                shifted_k[k:] = x[:-k]
-            shifted_list.append(shifted_k)
-        shifted_x = torch.cat(shifted_list, dim=1)
-        res = self.proj1(shifted_x)  # 历史注入项（非恒等残差）
+        # conv1: 无历史注入，仅卷积
         x = self._call_conv(self.conv1, x, edge_index, att_list, self.is_gat[0])
         if self.ifOpenBatchNorm: x = self.bn1(x)
-        x = F.relu(x + res)
+        x = F.relu(x)
         x = self.dropout(x)
         skip1 = x  # conv1输出(32维)，供Block1跨层残差使用
         # conv2: 短残差(32→32直接相加) + 跨层残差(conv1输出→conv2输出, 32→32直接相加)
