@@ -70,7 +70,6 @@ ifOpenClassWeight = False   # 是否启用类别加权损失
 ifOpenBatchNorm = False     # 是否启用BatchNorm
 ifOpenFocalLoss = False     # 是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
 focalLossGamma = 1.0        # Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
-residualHistoryN = 5        # conv1历史注入窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影注入；与抗梯度消失的残差无关）
 edgeWindowK =21            # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
 edgeStride = 3              # 入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
 ifOpenAttentionHeatmap = True  # 是否在训练结束后绘制GAT层热力图（需edgeWindowK>1才有意义，K=1时每节点仅1条入边注意力恒为1）
@@ -83,7 +82,6 @@ hyperSearchSpace = {        # 搜索空间：参数名→候选值列表（可�
     'ifOpenNormalize':   [True],            #[True, False],
     'ifOpenClassWeight': [False],           #[True, False],
     'ifOpenBatchNorm':   [False],           #[True, False],
-    'residualHistoryN':  [1, 3, 5, 8],
     'edgeWindowK':       [1, 5, 10, 20],
     'edgeStride':        [1, 2, 3, 5],
     'dropoutRate':       [0.1, 0.2, 0.4],
@@ -346,7 +344,6 @@ def signal_handler(signum, frame):
         periodRange = ctx.get('periodRange')
         edgeWindowK = ctx.get('edgeWindowK')
         edgeStride = ctx.get('edgeStride')
-        residualHistoryN = ctx.get('residualHistoryN')
         
         if model is not None:
             print(f'\n检测到正在训练，保存最佳模型...')
@@ -364,7 +361,7 @@ def signal_handler(signum, frame):
                 except Exception:
                     pass
             mode = cfg.get('netMode', 'unknown')
-            save_trained_model(model, dataDate, mode, modelSaveDir, ctx.get('scaler'), stock_count, current_acc, 'stop', periodRange, edgeWindowK, edgeStride, residualHistoryN)
+            save_trained_model(model, dataDate, mode, modelSaveDir, ctx.get('scaler'), stock_count, current_acc, 'stop', periodRange, edgeWindowK, edgeStride)
             if current_acc is not None:
                 print(f'模型已保存（测试Acc={current_acc*100:.2f}%）')
             else:
@@ -798,7 +795,7 @@ def convert_gat_state_dict(state_dict, model_state):
 class Net(torch.nn.Module):
     def __init__(self, cfg):
         """
-        :param cfg: 超参数字典（dropoutRate/ifOpenBatchNorm/residualHistoryN/ifOpenEdgeDropout/edgeDropoutRate等）
+        :param cfg: 超参数字典（dropoutRate/ifOpenBatchNorm/ifOpenEdgeDropout/edgeDropoutRate等）
         """
         super(Net, self).__init__()
         # 输入特征维度：优先从 cfg['featDim'] 动态获取（由建图后的数据决定），
@@ -830,7 +827,6 @@ class Net(torch.nn.Module):
             setattr(self, f'conv{i+1}', layer)
         self.dropout = torch.nn.Dropout(cfg['dropoutRate'])
         self.edge_dropout_rate = cfg['edgeDropoutRate'] if cfg['ifOpenEdgeDropout'] else 0.0
-        self.residualHistoryN = cfg['residualHistoryN']
         # proj3/5/9为残差投影层（维度不匹配时做线性投影对齐，近似恒等捷径）
         self.proj3 = torch.nn.Linear(32, 64)   # conv3残差投影（32→64）
         self.proj5 = torch.nn.Linear(64, 128)  # conv5残差投影（64→128）
@@ -976,14 +972,14 @@ def evaluate_test(model, data, test_mask):
     return {'accuracy': accuracy, 'precision': precision, 'recall': recall, 'f1': f1, 'cm': cm}
 
 #region ========== 模型保存/加载 ==========
-def save_trained_model(model, dataDate, mode, save_dir, scaler=None, stock_count=None, accuracy=None, stop_prefix='', periodRange=None, edgeWindowK=None, edgeStride=None, residualHistoryN=None):
+def save_trained_model(model, dataDate, mode, save_dir, scaler=None, stock_count=None, accuracy=None, stop_prefix='', periodRange=None, edgeWindowK=None, edgeStride=None):
     """
     保存模型权重和归一化参数
     文件名格式：{dataDate}_{mode}[_{stock_count}s]_{config}_{accuracy}.pth
     示例：
-      - 逐股训练：20260821_000001.SZ_onlyGAT_(1400d,21,3,5r)_72.34.pth
-      - 拼大图训练：20260821_onlyGAT_300s_(1400d,21,3,5r)_75.61.pth
-      - 中断保存：20260821_onlyGAT_300s_(1400d,21,3,5r)_stop68.52.pth
+      - 逐股训练：20260821_000001.SZ_onlyGAT_(1400d,21,3)_72.34.pth
+      - 拼大图训练：20260821_onlyGAT_300s_(1400d,21,3)_75.61.pth
+      - 中断保存：20260821_onlyGAT_300s_(1400d,21,3)_stop68.52.pth
     
     :param model: 训练好的模型
     :param dataDate: 数据日期（如 '20250101'）
@@ -996,7 +992,6 @@ def save_trained_model(model, dataDate, mode, save_dir, scaler=None, stock_count
     :param periodRange: 数据周期范围（如 1400），文件名显示为 1400d
     :param edgeWindowK: 入边窗口大小（如 21）
     :param edgeStride: 入边稀疏间隔（如 3）
-    :param residualHistoryN: 残差历史步数（如 5），文件名显示为 5r
     """
     os.makedirs(save_dir, exist_ok=True)
     # 拼接文件名各部分
@@ -1011,8 +1006,6 @@ def save_trained_model(model, dataDate, mode, save_dir, scaler=None, stock_count
         config_parts.append(str(edgeWindowK))
     if edgeStride is not None:
         config_parts.append(str(edgeStride))
-    if residualHistoryN is not None:
-        config_parts.append(f'{residualHistoryN}r')
     if config_parts:
         parts.append('(' + ','.join(config_parts) + ')')
     if accuracy is not None:
@@ -1067,8 +1060,6 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
         print(f'全局配置: 股票数={len(stock_data_list)}, 训练轮次={epochs}, 早停={ifOpenEarlyStop}(patience={cfg.get("earlyStopPatience", earlyStopPatience)}), 学习率调度={ifOpenLRScheduler}')
         if cfg['ifOpenFocalLoss']:
             print(f"Focal Loss已启用: gamma={cfg['focalLossGamma']}, alpha={class_weight_tensor}")
-        if cfg['residualHistoryN'] > 1:
-            print(f"conv1历史注入窗口: {cfg['residualHistoryN']}步拼接（维度 {model.feat_dim*cfg['residualHistoryN']}→32）")
         print(f"入边窗口: K={cfg['edgeWindowK']}, 稀疏间隔={cfg['edgeStride']}（每节点直接聚合前{cfg['edgeWindowK']}天内隔{cfg['edgeStride']}取一，边数={data.edge_index.shape[1]}）")
 
     precisions, recalls, f1s, losses = [], [], [], []
@@ -1093,8 +1084,7 @@ def run_training(cfg, stock_data_list, quiet=False, epochs=None):
         'test_mask': test_mask,
         'periodRange': periodRange,
         'edgeWindowK': cfg['edgeWindowK'],
-        'edgeStride': cfg['edgeStride'],
-        'residualHistoryN': cfg['residualHistoryN']
+        'edgeStride': cfg['edgeStride']
     }
     
     # 进入模型训练模式（启用 Dropout 和 Batch Normalization 防止过拟合）
@@ -1222,7 +1212,6 @@ def run_single_stock_compare(stockCode, modes, dataDate=dataDate, periodRange=pe
         'ifOpenNormalize': ifOpenNormalize,
         'ifOpenClassWeight': ifOpenClassWeight,
         'ifOpenBatchNorm': ifOpenBatchNorm,
-        'residualHistoryN': residualHistoryN,
         'edgeWindowK': edgeWindowK,
         'edgeStride': edgeStride,
         'dropoutRate': dropoutRate,
@@ -1243,7 +1232,7 @@ def run_single_stock_compare(stockCode, modes, dataDate=dataDate, periodRange=pe
         compare_results.append((mode, r, cfg))
         # 保存模型
         if ifSaveModel:
-            save_trained_model(r['model'], dataDate, f'{stockCode}_{mode}', modelSaveDir, r.get('scaler'), accuracy=r['accuracy'], periodRange=periodRange, edgeWindowK=edgeWindowK, edgeStride=edgeStride, residualHistoryN=residualHistoryN)
+            save_trained_model(r['model'], dataDate, f'{stockCode}_{mode}', modelSaveDir, r.get('scaler'), accuracy=r['accuracy'], periodRange=periodRange, edgeWindowK=edgeWindowK, edgeStride=edgeStride)
 
     # --- 对比表 ---
     # 输出到控制台和txt文件（追加模式）
@@ -1318,7 +1307,6 @@ def run_all_func(modes):
         'ifOpenNormalize': ifOpenNormalize,
         'ifOpenClassWeight': ifOpenClassWeight,
         'ifOpenBatchNorm': ifOpenBatchNorm,
-        'residualHistoryN': residualHistoryN,
         'edgeWindowK': edgeWindowK,
         'edgeStride': edgeStride,
         'dropoutRate': dropoutRate,
@@ -1495,7 +1483,6 @@ def run_all_func_lite(modes):
         'ifOpenNormalize': ifOpenNormalize,
         'ifOpenClassWeight': ifOpenClassWeight,
         'ifOpenBatchNorm': ifOpenBatchNorm,
-        'residualHistoryN': residualHistoryN,
         'edgeWindowK': edgeWindowK,
         'edgeStride': edgeStride,
         'dropoutRate': dropoutRate,
@@ -1760,7 +1747,6 @@ def run_method_three(stock_list_multi=None, compare_modes_multi=None, ifSaveMode
         'ifOpenNormalize': ifOpenNormalize,
         'ifOpenClassWeight': ifOpenClassWeight,
         'ifOpenBatchNorm': ifOpenBatchNorm,
-        'residualHistoryN': residualHistoryN,
         'edgeWindowK': edgeWindowK,
         'edgeStride': edgeStride,
         'dropoutRate': dropoutRate,
@@ -1781,7 +1767,7 @@ def run_method_three(stock_list_multi=None, compare_modes_multi=None, ifSaveMode
             result_multi = run_training(cfg, stock_data_list_multi, quiet=False)
             comparison_results_multi.append((mode, result_multi, cfg))
             if ifSaveModel:
-                save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'), len(stock_data_list_multi), result_multi['accuracy'], periodRange=periodRange, edgeWindowK=edgeWindowK, edgeStride=edgeStride, residualHistoryN=residualHistoryN)
+                save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'), len(stock_data_list_multi), result_multi['accuracy'], periodRange=periodRange, edgeWindowK=edgeWindowK, edgeStride=edgeStride)
         print(f'\n========== 对比结果 (方式三-多股票拼大图) ==========')
         print(f'{"模式":<10}{"Acc":>9}{"Precision":>11}{"Recall":>9}{"F1":>9}{"valF1":>9}{"轮次":>7}{"耗时(s)":>10}')
         print('-' * 75)
@@ -1798,7 +1784,7 @@ def run_method_three(stock_list_multi=None, compare_modes_multi=None, ifSaveMode
         cfg = {**base_cfg_multi, 'netMode': mode}
         result_multi = run_training(cfg, stock_data_list_multi, quiet=False)
         if ifSaveModel:
-            save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'), len(stock_data_list_multi), result_multi['accuracy'], periodRange=periodRange, edgeWindowK=edgeWindowK, edgeStride=edgeStride, residualHistoryN=residualHistoryN)
+            save_trained_model(result_multi['model'], dataDate, mode, modelSaveDir, result_multi.get('scaler'), len(stock_data_list_multi), result_multi['accuracy'], periodRange=periodRange, edgeWindowK=edgeWindowK, edgeStride=edgeStride)
         print('\n==============================')
         print(f'方式三-测试集评估结果（模式: {mode}）')
         print('==============================')
@@ -1891,7 +1877,6 @@ def run_method_four(model_name, net_mode, stock_list=None):
         'ifOpenNormalize': ifOpenNormalize,
         'ifOpenClassWeight': ifOpenClassWeight,
         'ifOpenBatchNorm': ifOpenBatchNorm,
-        'residualHistoryN': residualHistoryN,
         'edgeWindowK': edgeWindowK,
         'edgeStride': edgeStride,
         'dropoutRate': dropoutRate,
@@ -1979,7 +1964,6 @@ def run_method_four_rolling(model_name, net_mode, stock_list=None, test_ratio=0.
         'ifOpenNormalize': ifOpenNormalize,  # 使用和训练时相同的归一化设置
         'ifOpenClassWeight': ifOpenClassWeight,
         'ifOpenBatchNorm': ifOpenBatchNorm,
-        'residualHistoryN': residualHistoryN,
         'edgeWindowK': edgeWindowK,
         'edgeStride': edgeStride,
         'dropoutRate': dropoutRate,
@@ -2170,7 +2154,6 @@ def run_live_predict(model_name, net_mode, stock_list=None, is_live=True, max_co
         'ifOpenNormalize': ifOpenNormalize,
         'ifOpenClassWeight': ifOpenClassWeight,
         'ifOpenBatchNorm': ifOpenBatchNorm,
-        'residualHistoryN': residualHistoryN,
         'edgeWindowK': edgeWindowK,
         'edgeStride': edgeStride,
         'dropoutRate': dropoutRate,
