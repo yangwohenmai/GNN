@@ -52,7 +52,7 @@ periodRange = 1400          # 根据dataDate，向前取多少个自然日
 # 获取最新日期，取出当天所有股票作为股票池（默认取周一的股票池）
 getNewStockPoolByDate = datetime.fromordinal(datetime.today().toordinal() - (datetime.today().weekday() or 7)).strftime('%Y-%m-%d')
 useLocalData = False         # 是否使用本地缓存数据（True=从本地txt文件读取行情和股票池，False=联网从baostock获取）
-ifOpenMultiStock = True    # 是否启用多股票训练（True=遍历沪深300码表拼大图，False=仅用stockCode单股票训练）
+ifOpenMultiStock = True     # 是否启用多股票训练（True=遍历沪深300码表拼大图，False=仅用stockCode单股票训练）
 maxStockCount = 30          # 用多少只股票同时训练（仅多股票模式生效，None=不限制）
 dropoutRate = 0.1           # Dropout率
 trainingTimes = 20000        # 训练轮次
@@ -71,7 +71,7 @@ ifOpenBatchNorm = False     # 是否启用BatchNorm
 ifOpenFocalLoss = False     # 是否启用Focal Loss（动态聚焦难分样本，对抗类别塌缩）
 focalLossGamma = 1.0        # Focal Loss聚焦参数（越大越聚焦难样本，通常取2）
 residualHistoryN = 5        # conv1历史注入窗口大小（1=仅x[i-1]，n=前n个历史节点x[i-n]~x[i-1]拼接后投影注入；与抗梯度消失的残差无关）
-edgeWindowK =21            # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
+edgeWindowK =21             # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
 edgeStride = 3              # 入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
 numAttentionHeads = 1       # GAT注意力头数（1=单头；超参数搜索时此值被搜索空间覆盖，非搜索路径用此值）
 ifOpenGATConcat = False     # GAT多头注意力输出方式（False=多头取平均，维度不变；True=多头拼接，维度=heads*out_d）
@@ -85,16 +85,16 @@ hyperSearchSpace = {        # 搜索空间：参数名→候选值列表（可�
     'ifOpenNormalize':   [True],            #[True, False],
     'ifOpenClassWeight': [False],           #[True, False],
     'ifOpenBatchNorm':   [False],           #[True, False],
-    'residualHistoryN':  [1, 3, 5, 8],
-    'edgeWindowK':       [1, 5, 10, 20],
-    'edgeStride':        [1, 2, 3, 5],
-    'dropoutRate':       [0.1, 0.2, 0.4],
+    'residualHistoryN':  [1, 3, 5],
+    'edgeWindowK':       [1, 5, 9, 15],
+    'edgeStride':        [1, 2, 3, 4],
+    'dropoutRate':       [0.1, 0.2, 0.3],
     'ifOpenEdgeDropout': [False],           #[True, False],
     'edgeDropoutRate':   [0.2],             #[0.1, 0.2, 0.3],
     'ifOpenFocalLoss':   [False],           #[True, False],
     'focalLossGamma':    [1.0],             #[1.0, 2.0],
-    'earlyStopPatience': [200],            #[50, 100, 200]搜索阶段用小patience加速（单次训练模式用全局earlyStopPatience=800）
-    'numAttentionHeads': [2, 3, 4],        # GAT注意力头数（1=单头，2/4=多头取平均，维度不变）
+    'earlyStopPatience': [200],             #[50, 100, 200]搜索阶段用小patience加速（单次训练模式用全局earlyStopPatience=800）
+    'numAttentionHeads': [2, 3, 4],         # GAT注意力头数（1=单头，2/4=多头取平均，维度不变）
 }
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #运行设备：有GPU用cuda，否则用cpu
 modelSaveDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'saved_models')  # 模型保存目录（方式三保存/方式四加载共用）
@@ -2382,7 +2382,7 @@ if __name__ == '__main__':
     #endregion
 
     #run_all_func(modes=['onlyGAT'])
-    run_all_func_lite(modes=['mixed', 'onlyGCN', 'onlyGAT'])
+    run_all_func_lite(modes=['mixed', 'onlyGAT'])
 
     #region 方式一：手动指定股票列表
     #stock_list = ['000009.SZ', '000010.SZ', '000011.SZ', '000012.SZ', '000013.SZ', '000014.SZ', '000015.SZ', '000016.SZ', '000017.SZ']
