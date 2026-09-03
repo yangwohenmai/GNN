@@ -1413,13 +1413,14 @@ def run_all_func(modes):
                 trial_cfg = {**cfg, 'netMode': mode}
                 doneCount += 1
                 r = run_training(trial_cfg, stock_data_list, quiet=True, epochs=hyperSearchTrainingTimes)
-                trial_results.append((r['best_val_f1'], r, trial_cfg))
+                trial_results.append((r['best_val_f1'], r, trial_cfg, doneCount))
                 print(f"[trial {doneCount:2d}/{totalTrials}] valF1={r['best_val_f1']:.4f}(第{r['best_epoch']}轮) | test[Acc={r['accuracy']:.4f} P={r['precision']:.4f} R={r['recall']:.4f} F1={r['f1']:.4f}] 耗时={r['elapsed']:.0f}s  {trial_cfg}")
         #按验证F1排序选最优（不看testF1，避免用测试集选模型造成评估泄露）
         trial_results.sort(key=lambda t: t[0], reverse=True)
         print('------ 搜索结果Top5（按验证F1排序） ------')
-        for vf1, r, cfg in trial_results[:5]:
-            print(f"valF1={vf1:.4f} testF1={r['f1']:.4f}  {cfg}")
+        for vf1, r, cfg, trial_no in trial_results[:5]:
+            cm_str = str(r['cm']).replace('\n', ' ')
+            print(f"[trial {trial_no:2d}/{totalTrials}] valF1={vf1:.4f}(第{r['best_epoch']}轮) | test[Acc={r['accuracy']:.4f} P={r['precision']:.4f} R={r['recall']:.4f} F1={r['f1']:.4f}] 耗时={r['elapsed']:.0f}s {cm_str} {cfg}")
         best_cfg = trial_results[0][2]
         print(f'最佳配置: {best_cfg}')
         print('提示：将最佳配置手动填回参数区并关闭ifOpenHyperSearch，即可单次训练复现（种子固定，结果与搜索时一致，可看逐轮日志与训练曲线）')
@@ -1486,11 +1487,11 @@ def run_all_func_lite(modes):
     轻量版完整训练入口，按开关走三条主流程：消融实验 / 超参数搜索 / 单次训练
     与run_all_func的区别：不画热力图、不弹图表、不需要按回车，只输出文本指标
     :param modes: 网络模式列表，如 ['onlyGAT'] 只跑一种，或 ['mixed', 'onlyGCN', 'onlyGAT'] 跑多种对比；必填
-    日志：运行期间本函数输出到控制台的所有信息，经log_print原样追加写入 超参数_{dataDate}_{maxStockCount}s_({periodRange}d,{len(modes)}m,{hyperSearchTrials}round).txt
+    日志：运行期间本函数输出到控制台的所有信息，经log_print原样追加写入 超参数_{dataDate}_{maxStockCount}s_({periodRange}d,{len(modes)}m,head,{hyperSearchTrials}round).txt
     """
     global current_code, allStockSorted, _active_log_file
     # 打开日志文件：本函数控制台输出内容原样写入txt（追加模式，每行写入后立即flush防中断丢失）
-    _active_log_file = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), f'超参数_{dataDate}_{maxStockCount}s_({periodRange}d,{len(modes)}m,{hyperSearchTrials}round).txt'), 'a', encoding='utf-8')
+    _active_log_file = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), f'超参数_{dataDate}_{maxStockCount}s_({periodRange}d,{len(modes)}m,head,{hyperSearchTrials}round).txt'), 'a', encoding='utf-8')
     if not useLocalData:
         bs.login()
     stock_data_list = []
@@ -1590,7 +1591,7 @@ def run_all_func_lite(modes):
                 except Exception as ex:
                     log_print(f"[trial {doneCount:2d}/{totalTrials}] 训练失败，跳过：{ex}  {trial_cfg}")
                     continue
-                trial_results.append((r['best_val_f1'], r, trial_cfg))
+                trial_results.append((r['best_val_f1'], r, trial_cfg, doneCount))
                 # 单行紧凑格式，控制台与txt经log_print完全一致输出（混淆矩阵换行替换为空格，保证一行一条）
                 cm_str = str(r['cm']).replace('\n', ' ')
                 log_print(f"[trial {doneCount:2d}/{totalTrials}] valF1={r['best_val_f1']:.4f}(第{r['best_epoch']}轮) | test[Acc={r['accuracy']:.4f} P={r['precision']:.4f} R={r['recall']:.4f} F1={r['f1']:.4f}] 耗时={r['elapsed']:.0f}s {cm_str} {trial_cfg}")
@@ -1601,8 +1602,9 @@ def run_all_func_lite(modes):
             _active_log_file = None
             return None
         log_print('\n------ 搜索结果Top5（按验证F1排序） ------')
-        for vf1, r, cfg in trial_results[:5]:
-            log_print(f"valF1={vf1:.4f} testF1={r['f1']:.4f}  {cfg}")
+        for vf1, r, cfg, trial_no in trial_results[:5]:
+            cm_str = str(r['cm']).replace('\n', ' ')
+            log_print(f"[trial {trial_no:2d}/{totalTrials}] valF1={vf1:.4f}(第{r['best_epoch']}轮) | test[Acc={r['accuracy']:.4f} P={r['precision']:.4f} R={r['recall']:.4f} F1={r['f1']:.4f}] 耗时={r['elapsed']:.0f}s {cm_str} {cfg}")
         best_cfg = trial_results[0][2]
         log_print(f'\n最佳配置: {best_cfg}')
         log_print('提示：将最佳配置手动填回参数区并关闭ifOpenHyperSearch，即可单次训练复现（种子固定，结果与搜索时一致，可看逐轮日志与训练曲线）')
