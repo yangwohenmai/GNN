@@ -828,8 +828,13 @@ class Net(torch.nn.Module):
             elif self.netMode == 'onlyGAT':
                 # onlyGAT+concat=True：维度膨胀（out_d * heads）
                 out_d = target_out * heads if concat else target_out
-            else:  # mixed：维度保持型concat，GAT层输出=target_out（每头out_d//heads，拼接后=target_out）
-                out_d = target_out
+            else:  # mixed：维度保持型concat，向上取整到能被heads整除的值
+                if concat:
+                    # 向上取整：找到>=target_out且能被heads整除的最小值
+                    per_head_out = (target_out + heads - 1) // heads  # 等价于ceil(target_out/heads)
+                    out_d = per_head_out * heads
+                else:
+                    out_d = target_out
             actual_dims.append((in_d, out_d))
             cur_dim = out_d
         # 记录每层是否为GAT（用于注意力收集：仅GAT层可返回attention权重）
