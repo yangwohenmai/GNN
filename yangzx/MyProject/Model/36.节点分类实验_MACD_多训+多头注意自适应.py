@@ -849,7 +849,9 @@ class Net(torch.nn.Module):
                 layer = GATConv(in_d, 2, heads=1, concat=False)
                 self.is_gat.append(True)
             elif self.netMode == 'onlyGAT':
-                layer = GATConv(in_d, out_d, heads=heads, concat=concat)
+                # onlyGAT模式：concat=True时GATConv会自动乘以heads，所以传入target_out即可
+                # concat=False时直接传target_out
+                layer = GATConv(in_d, dims[i][1], heads=heads, concat=concat)
                 self.is_gat.append(True)
             else:  # mixed
                 if i % 2 == 0:  # GCN层
