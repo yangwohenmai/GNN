@@ -74,7 +74,7 @@ residualHistoryN = 5        # conv1历史注入窗口大小（1=仅x[i-1]，n=�
 edgeWindowK =21             # 入边窗口大小（每个节点i接收前K个相邻节点的边X[i-K]~X[i-1]→X[i]，1=单链结构）
 edgeStride = 3              # 入边稀疏间隔（从X[i-1]开始每隔stride取一个，如K=3、stride=2时仅X[i-3]、X[i-1]→X[i]，1=稠密窗口）
 numAttentionHeads = 1       # GAT注意力头数（1=单头；超参数搜索时此值被搜索空间覆盖，非搜索路径用此值）
-ifOpenGATConcat = False     # GAT多头注意力输出方式（False=多头取平均，维度不变；True=多头拼接，维度=heads*out_d）
+ifOpenGATConcat = True     # GAT多头注意力输出方式（False=多头取平均，维度不变；True=多头拼接，维度=heads*out_d）
 ifOpenAttentionHeatmap = True  # 是否在训练结束后绘制GAT层热力图（需edgeWindowK>1才有意义，K=1时每节点仅1条入边注意力恒为1）
 ifOpenAblation = False       # 是否启用消融实验模式（开启后遍历ablationModes各组训练并输出对比表，量化GCN/GAT对训练的影响）
 ablationModes = ['mixed', 'onlyGCN', 'onlyGAT']  # 消融实验对比的网络模式列表（mixed=当前GCN-GAT交替基准）
@@ -86,7 +86,7 @@ hyperSearchSpace = {        # 搜索空间：参数名→候选值列表（可�
     'ifOpenClassWeight': [False],           #[True, False],
     'ifOpenBatchNorm':   [False],           #[True, False],
     'residualHistoryN':  [1, 3, 5],
-    'edgeWindowK':       [1, 5, 9, 15],
+    'edgeWindowK':       [1, 5, 9, 16],
     'edgeStride':        [1, 2, 3, 4],
     'dropoutRate':       [0.1, 0.2, 0.3],
     'ifOpenEdgeDropout': [False],           #[True, False],
