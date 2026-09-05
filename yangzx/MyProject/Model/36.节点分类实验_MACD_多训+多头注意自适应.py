@@ -1449,7 +1449,7 @@ def run_all_func(modes):
         doneCount = 0
         for idx, cfg in enumerate(trial_configs):
             for mode in modeList:
-                trial_cfg = {**cfg, 'netMode': mode}
+                trial_cfg = {**base_cfg, **cfg, 'netMode': mode}
                 doneCount += 1
                 r = run_training(trial_cfg, stock_data_list, quiet=True, epochs=hyperSearchTrainingTimes)
                 trial_results.append((r['best_val_f1'], r, trial_cfg, doneCount))
@@ -1625,12 +1625,13 @@ def run_all_func_lite(modes):
         doneCount = 0
         for idx, cfg in enumerate(trial_configs):
             for mode in modeList:
-                trial_cfg = {**cfg, 'netMode': mode}
+                trial_cfg = {**base_cfg, **cfg, 'netMode': mode}
                 doneCount += 1
                 try:
                     r = run_training(trial_cfg, stock_data_list, quiet=True, epochs=hyperSearchTrainingTimes)
                 except Exception as ex:
                     log_print(f"[trial {doneCount:2d}/{totalTrials}] 训练失败，跳过：{ex}  {trial_cfg}")
+                    log_error(f'trial_{doneCount}_{trial_cfg.get("netMode", "unknown")}', traceback.format_exc())
                     continue
                 trial_results.append((r['best_val_f1'], r, trial_cfg, doneCount))
                 # 单行紧凑格式，控制台与txt经log_print完全一致输出（混淆矩阵换行替换为空格，保证一行一条）
